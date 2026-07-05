@@ -1,0 +1,5 @@
+.git
+.jj
+__pychache__
+scratch
+*.pyc
