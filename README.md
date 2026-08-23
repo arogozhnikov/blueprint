@@ -53,6 +53,65 @@ collections, all recursively type-checked on construction and on every
 mutation. `blueprint.format()` pretty-prints a config (and its nested
 configs/collections), wrapping long lines for readability.
 
+## Nested configs and collections
+
+Mutability cascades: unlocking a config with `mutable_copy()` also unlocks
+every nested `BlueprintCfg`, list, and dict field reachable from it, so you
+don't need a separate `mutable_copy()` per nested object.
+
+```python
+import blueprint
+from blueprint import BlueprintCfg, field
+
+class RetryCfg(BlueprintCfg):
+    max_attempts: int = 3
+    backoff: float = 1.5
+
+class ServiceCfg(BlueprintCfg):
+    name: str
+    retry: RetryCfg = field(default_factory=RetryCfg)
+    endpoints: list[str] = field(default_factory=list)
+
+svc = ServiceCfg(name="api", endpoints=["https://a.example"])
+
+with svc.mutable_copy() as svc2:
+    svc2.retry.max_attempts = 5        # nested config, no extra mutable_copy() needed
+    svc2.endpoints.append("https://b.example")
+
+print(blueprint.format(svc2))
+# ServiceCfg(
+#   name='api',
+#   retry=RetryCfg(max_attempts=5, backoff=1.5),
+#   endpoints=['https://a.example', 'https://b.example'],
+# )
+```
+
+## Errors
+
+Field type-check failures raise `InvalidBlueprintError` (a `TypeError`
+subclass, so existing `except TypeError` handling keeps working). Its
+`errors` attribute lists every field that failed, not just the first one:
+
+```python
+from blueprint import InvalidBlueprintError
+
+try:
+    ServerCfg(host=123, port="oops")
+except InvalidBlueprintError as e:
+    print(e.errors)  # one message per bad field
+```
+
+`check()` failures (like the `port out of range` example above) are raised
+as whatever exception your `check()` method raises -- they aren't wrapped.
+
+If a `mutable_copy()` block raises an unrelated exception while the config
+is left in a temporarily-invalid cross-field state, that state is no longer
+re-raised as a replacement exception: a `UserWarning` is emitted instead,
+and the original exception keeps propagating with its original type. See
+the inline comments around `mutable_copy()` in `src/blueprint/_blueprint.py`
+for more detail.
+
+
 ## Development
 
 ```bash
@@ -61,16 +120,3 @@ pytest
 ruff format .
 ruff check .
 ```
-
-## Known limitations
-
-One thing worth knowing before relying on this in production:
-
-- If a `mutable_copy()` block raises an unrelated exception while the
-  config is in a temporarily-invalid cross-field state, the `check()`
-  failure raised while unwinding the block will replace that original
-  exception (it's kept as `__context__`, but the exception type you see
-  changes).
-
-See the inline comments in `src/blueprint/__init__.py` for more detail.
-

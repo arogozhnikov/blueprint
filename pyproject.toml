@@ -30,7 +30,7 @@ dev = [
 packages = ["src/blueprint"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src/blueprint"]
 
 [tool.ruff]
 line-length = 120

@@ -2,10 +2,11 @@ import copy
 import enum
 import pickle
 import unittest
+import warnings
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
-from blueprint import BlueprintCfg, ConfigDict, ConfigList, field
+from blueprint import BlueprintCfg, ConfigDict, ConfigList, InvalidBlueprintError, field
 
 
 class Color(enum.Enum):
@@ -379,7 +380,19 @@ class TestBlueprintCfg(unittest.TestCase):
         self.assertEqual(cfg.name, "Ada")
         self.assertEqual(cfg.greet(), "Hello, Ada!")
 
-        # TODO add test with reverse order of mixins
+    def test_multiple_inheritance_with_non_blueprint_mixin_reverse_order(self):
+        # Same as above, but with BlueprintCfg listed before the mixin -- exercises
+        # __init_subclass__'s field-collection loop with a different __mro__ ordering.
+        class GreetingMixin:
+            def greet(self):
+                return f"Hello, {self.name}!"
+
+        class GreeterCfg(BlueprintCfg, GreetingMixin):
+            name: str
+
+        cfg = GreeterCfg(name="Ada")
+        self.assertEqual(cfg.name, "Ada")
+        self.assertEqual(cfg.greet(), "Hello, Ada!")
 
     def test_metadata_and_hover_descriptions(self):
         class AnnotatedMetaCfg(BlueprintCfg):
@@ -823,6 +836,56 @@ class TestImmutableByDefault(unittest.TestCase):
         self.assertFalse(p._is_blueprint_mutable)
         self.assertFalse(p.child._is_blueprint_mutable)
         self.assertFalse(p.tag_list._is_blueprint_mutable)
+
+
+class TestInvalidBlueprintError(unittest.TestCase):
+    """Covers: InvalidBlueprintError, raised by _validate_self() for field type mismatches."""
+
+    def test_is_a_type_error_subclass(self):
+        # Existing `except TypeError` / assertRaises(TypeError) callers keep working
+        # unchanged since InvalidBlueprintError subclasses TypeError.
+        self.assertTrue(issubclass(InvalidBlueprintError, TypeError))
+        with self.assertRaises(TypeError):
+            ChildCfg(name="Test", value="not an int")
+
+    def test_collects_every_failing_field_not_just_the_first(self):
+        class TwoBadFields(BlueprintCfg):
+            a: int
+            b: str
+
+        with self.assertRaises(InvalidBlueprintError) as ctx:
+            TwoBadFields(a="not an int", b=123)
+
+        self.assertEqual(len(ctx.exception.errors), 2)
+        self.assertIn("'a'", ctx.exception.errors[0])
+        self.assertIn("'b'", ctx.exception.errors[1])
+
+
+class TestMutableCopyExceptionHandling(unittest.TestCase):
+    """Covers: an unrelated exception raised inside a mutable_copy() block while the
+    clone is left in a temporarily-invalid cross-field state."""
+
+    def test_original_exception_propagates_with_original_type(self):
+        cfg = CustomCheckCfg(min_val=10, max_val=20)
+
+        with self.assertWarns(UserWarning):
+            with self.assertRaises(RuntimeError):
+                with cfg.mutable_copy() as y:
+                    y.min_val = 25  # leaves y invalid: min_val (25) > max_val (20)
+                    raise RuntimeError("boom")
+
+        self.assertEqual(cfg.min_val, 10)  # original untouched
+
+    def test_no_warning_when_block_completes_normally(self):
+        # No earlier exception here -- the ValueError from check() at block-exit is
+        # the real error, so it should be raised directly, without a warning first.
+        cfg = CustomCheckCfg(min_val=10, max_val=20)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # any warning here fails the test
+            with self.assertRaises(ValueError):
+                with cfg.mutable_copy() as y:
+                    y.min_val = 25  # leaves y invalid, block itself doesn't raise
+        self.assertEqual(cfg.min_val, 10)
 
 
 if __name__ == "__main__":

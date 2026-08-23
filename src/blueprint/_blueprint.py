@@ -1,8 +1,10 @@
+from xml.dom import ValidationErr
 import contextlib
 import copy
 import enum
 import types
 import typing
+import warnings
 from typing import (
     Annotated,
     Any,
@@ -18,6 +20,7 @@ __all__ = [
     "ConfigDict",
     "ConfigList",
     "FieldInfo",
+    "InvalidBlueprintError",
     "MISSING",
     "check_type",
     "field",
@@ -28,6 +31,15 @@ __all__ = [
 class MissingType:
     def __repr__(self):
         return "MISSING"
+
+
+class InvalidBlueprintError(TypeError):
+    """Raised by `_validate_self()` when one or more fields fail their type check.
+    """
+
+    def __init__(self, errors: list[str]): # change to tuple[str, ....]
+        self.errors = errors
+        super().__init__("; ".join(errors))
 
 
 MISSING = MissingType()
@@ -405,12 +417,13 @@ class BlueprintCfg:
 
         combined_fields = {}
 
-        # Inherit fields from parents in MRO (parents evaluated first so subclasses override them)
+        # Inherit fields from parents in MRO (parents evaluated first so subclasses override them).
+        # `cls` itself is excluded: __blueprint_fields__ doesn't exist yet (this loop is part of what builds it)
         for base in reversed(cls.__mro__):
-            if base is object or base is BlueprintCfg:
+            if base is object or base is BlueprintCfg or base is cls:
                 continue
-            # TODO can we check for isinstance(BlueprintCfg) instead?
-            if hasattr(base, "__blueprint_fields__"):
+            # issubclass(), not isinstance(): `base` is itself a class (an MRO entry)
+            if issubclass(base, BlueprintCfg):
                 combined_fields.update(base.__blueprint_fields__)
 
         # Get local type annotations
@@ -536,13 +549,16 @@ class BlueprintCfg:
 
     def _validate_self(self):
         """Non-recursive validation (all fields + self.check())."""
+        errors = []
         for name, field_info in self.__blueprint_fields__.items():
             value = getattr(self, name)
             if not check_type(value, field_info.type):
-                raise TypeError(
+                errors.append(
                     f"Invalid type for field {repr(name)} in {self.__class__.__name__}. "
                     f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})"
                 )
+        if errors:
+            raise InvalidBlueprintError(errors)
         self.check()
 
     def check(self):
@@ -624,9 +640,12 @@ class BlueprintCfg:
             initial_mutables.append(node)
             _set_mutable(node, True)
 
+        exception: BaseException | None = None
         try:
             yield clone
-        except BaseException:
+        except BaseException as exc:
+            # Stash into the outer `exception` variable before re-raising
+            exception = exc
             raise
         finally:
             # reset to immutable, protection for the case of mutables
@@ -634,8 +653,22 @@ class BlueprintCfg:
                 _set_mutable(node, False)
             for node in _flat_iter_containers(clone):
                 _set_mutable(node, False)
-                if isinstance(node, BlueprintCfg):
-                    node._validate_self()
+
+            try:
+                for node in _flat_iter_containers(clone):
+                    if isinstance(node, BlueprintCfg):
+                        node._validate_self()
+            except BaseException:
+                if exception is None:
+                    raise
+                else:
+                    # just warn about new problematic class
+                    warnings.warn(
+                        f"{clone.__class__.__name__} was left in an invalid state after "
+                        f"mutable_copy() exited because of {exception!r}: {new_validation_error}",
+                        stacklevel=2,
+                    )                    
+                    return # keep propagating previous exception
 
 
 def _format_leaf(value: Any) -> str:
