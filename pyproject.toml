@@ -14,8 +14,6 @@ authors = [
 keywords = ["config", "configuration", "dataclass", "typing", "validation", "immutable"]
 classifiers = [
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
 dependencies = []

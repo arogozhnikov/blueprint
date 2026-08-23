@@ -1,6 +1,6 @@
 """
 Runnable tour of blueprint's features.
-
+Just install blueprint and run this file.
 """
 
 import blueprint

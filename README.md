@@ -94,7 +94,34 @@ print(blueprint.format(svc2))
 # )
 ```
 
-## Important gothas
+
+## Comparison with other common tools
+
+We have a ton of config libs. Why creating one more? 
+
+Compared to Hydra/OmegaConf/etc: code-based configuration, convenient checks, static typechecking. Overrides without craziness.
+
+Compared to dataclasses: *working* immutability, runtime typechecking, post-modification type-checking.
+
+Compared to pydantic: copy-with-changes in pydantic is very tough:
+
+```python
+cfg = cfg.model_copy(
+    update={
+        "retry": cfg.retry.model_copy(
+            update={"max_attempts": 10}
+        )
+    }
+)
+# above approach is cumbersome and not typecheckable.
+# While in blueprint it is just ...
+with cfg.mutable_copy() as cfg:
+    cfg.retry.max_attempts = 10
+```
+Additinally, multiple change paths in pydantic do not trigger revalidation - poor behaviour for configs.
+
+
+## Important gotchas
 
 Everything that goes into config (in constructor or by assignment) 
 is immediately cloned, and has no link connections to previously existing objects.
@@ -129,10 +156,10 @@ ServerCfg(host=123, port="oops")
 ```
 
 Output (note there is a line for every exception):
-# TODO make every problem problem produce independent line.
 
 ```
-blueprint._blueprint.InvalidBlueprintError: Invalid type for field 'host' in ServerCfg. Expected <class 'str'>, got int (123); Invalid type for field 'port' in ServerCfg. Expected <class 'int'>, got str ('oops')
+blueprint._blueprint.InvalidBlueprintError: Invalid type for field 'host' in ServerCfg. Expected <class 'str'>, got int (123)
+Invalid type for field ServerCfg.port. Expected <class 'int'>, got str ('oops')
 ```
 
 

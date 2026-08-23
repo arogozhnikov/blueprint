@@ -37,9 +37,19 @@ class MissingType:
 class InvalidBlueprintError(TypeError):
     """Raised by `_validate_self()` when one or more fields fail their type check."""
 
-    def __init__(self, errors: list[str]):  # change to tuple[str, ....]
+    def __init__(self, errors: tuple[str, ...]):
         self.errors = errors
-        super().__init__("; ".join(errors))
+        super().__init__("\n".join(errors))
+
+    def __repr__(self):
+        # The inherited BaseException.__repr__ shows args via repr(), so the embedded
+        # "\n" between errors would render as a literal "\n" instead of a line break.
+        # Mirror __str__'s one-error-per-line layout here too.
+        body = "\n".join(f"  {error}" for error in self.errors)
+        return f"{type(self).__name__}(\n{body}\n)"
+
+    def __str__(self):
+        return self.__repr__()
 
 
 MISSING = MissingType()
@@ -248,7 +258,7 @@ class ConfigList(list):
         super().__delitem__(index)
 
     def __assert_mutable(self):
-        if not (self._is_blueprint_mutable or  _BlueprintState._global_mutable_depth > 0):
+        if not (self._is_blueprint_mutable or _BlueprintState._global_mutable_depth > 0):
             raise AttributeError("Cannot modify ConfigList outside of a mutable_copy() block")
 
     def __reduce__(self):
@@ -595,11 +605,11 @@ class BlueprintCfg:
             value = getattr(self, name)
             if not check_type(value, field_info.type):
                 errors.append(
-                    f"Invalid type for field {repr(name)} in {self.__class__.__name__}. "
+                    f"Invalid type for field {self.__class__.__name__}.{name}: "
                     f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})"
                 )
         if errors:
-            raise InvalidBlueprintError(errors)
+            raise InvalidBlueprintError(tuple(errors))
         self.check()
 
     def check(self):
@@ -629,9 +639,11 @@ class BlueprintCfg:
 
         # Field-level checks run always
         if not check_type(value, field_info.type):
-            raise TypeError(
-                f"Invalid type for field {repr(name)} in {self.__class__.__name__}. "
-                f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})"
+            raise InvalidBlueprintError(
+                errors=(
+                    f"Invalid type for field {self.__class__.__name__}{name}: "
+                    f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})",
+                )
             )
 
         super().__setattr__(name, value)
@@ -769,7 +781,7 @@ def _format_value(value: Any, indent: int, linewidth: int, level: int) -> str:
     return _format_leaf(value)
 
 
-def format(cfg: BlueprintCfg, indent: int = 2, linewidth: int = 120) -> str:
+def format(cfg: BlueprintCfg, indent: int = 2, linewidth: int = 100) -> str:
     """Pretty-prints a BlueprintCfg (and any nested configs/containers) as a
     readable, deterministic string."""
     if not isinstance(cfg, BlueprintCfg):
