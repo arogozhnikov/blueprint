@@ -367,6 +367,20 @@ class TestBlueprintCfg(unittest.TestCase):
         self.assertEqual(y.x, 3)
         self.assertEqual(s.x, 2)  # original untouched
 
+    def test_multiple_inheritance_with_non_blueprint_mixin(self):
+        class GreetingMixin:
+            def greet(self):
+                return f"Hello, {self.name}!"
+
+        class GreeterCfg(GreetingMixin, BlueprintCfg):
+            name: str
+
+        cfg = GreeterCfg(name="Ada")
+        self.assertEqual(cfg.name, "Ada")
+        self.assertEqual(cfg.greet(), "Hello, Ada!")
+
+        # TODO add test with reverse order of mixins
+
     def test_metadata_and_hover_descriptions(self):
         class AnnotatedMetaCfg(BlueprintCfg):
             port: Annotated[int, "The port number"] = 8080

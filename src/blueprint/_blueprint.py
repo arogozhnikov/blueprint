@@ -13,6 +13,17 @@ from typing import (
     get_origin,
 )
 
+__all__ = [
+    "BlueprintCfg",
+    "ConfigDict",
+    "ConfigList",
+    "FieldInfo",
+    "MISSING",
+    "check_type",
+    "field",
+    "format",
+]
+
 
 class MissingType:
     def __repr__(self):
@@ -301,7 +312,7 @@ def _set_mutable(node, mutable):
 def _flat_iter_containers(value):
     """Post-order walk of container hierarchy"""
     if isinstance(value, BlueprintCfg):
-        for name in getattr(value, "__blueprint_fields__", {}):
+        for name in value.__blueprint_fields__:
             child = value.__dict__.get(name, MISSING)
             if child is not MISSING:
                 yield from _flat_iter_containers(child)
@@ -387,8 +398,7 @@ class BlueprintCfg:
     __blueprint_fields__: dict[str, FieldInfo]
     # allows mutations on this instance; mutable_copy() cascades this to the whole
     # nested tree (see _iter_containers/_set_mutable), so children get their own flag too
-    _is_blueprint_mutable = False # TODO why switching to True does not crash tests?
-
+    _is_blueprint_mutable: bool = False
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -399,7 +409,7 @@ class BlueprintCfg:
         for base in reversed(cls.__mro__):
             if base is object or base is BlueprintCfg:
                 continue
-            # TODO should we check  this 
+            # TODO can we check for isinstance(BlueprintCfg) instead?
             if hasattr(base, "__blueprint_fields__"):
                 combined_fields.update(base.__blueprint_fields__)
 
@@ -505,10 +515,6 @@ class BlueprintCfg:
             if extra:
                 raise TypeError(f"__init__() got unexpected keyword arguments: {', '.join(map(repr, sorted(extra)))}")
 
-            # Initialize private state
-            # TODO do we need _initialized? at all
-            self.__dict__["_initialized"] = False
-
             # Populate fields
             for name, field_info in fields.items():
                 if name in kwargs:
@@ -520,16 +526,17 @@ class BlueprintCfg:
                 else:
                     raise TypeError(f"__init__() missing required keyword-only argument: {repr(name)}")
 
+                # Deep-copy first so construction can't alias external mutable state
+                # (mirrors __setattr__, which does the same for the same reason).
+                val = copy.deepcopy(val)
                 val = _convert_value(val, field_info.type)
                 self.__dict__[name] = val
 
-            self.__dict__["_initialized"] = True
             self._validate_self()
 
     def _validate_self(self):
         """Non-recursive validation (all fields + self.check())."""
-        fields = getattr(self, "__blueprint_fields__", {})
-        for name, field_info in fields.items():
+        for name, field_info in self.__blueprint_fields__.items():
             value = getattr(self, name)
             if not check_type(value, field_info.type):
                 raise TypeError(
@@ -543,8 +550,7 @@ class BlueprintCfg:
         pass
 
     def __setattr__(self, name, value):
-        fields = getattr(self, "__blueprint_fields__", {})
-        if name not in fields:
+        if name not in self.__blueprint_fields__:
             if name.startswith("_"):
                 super().__setattr__(name, value)
                 return
@@ -555,7 +561,7 @@ class BlueprintCfg:
                 f"Cannot assign to field {repr(name)} of {self.__class__.__name__} outside of a mutable_copy() block"
             )
 
-        field_info = fields[name]
+        field_info = self.__blueprint_fields__[name]
         # Deep-copy first so we didn't modify or link some external object
         value = copy.deepcopy(value)
         value = _convert_value(value, field_info.type)
@@ -575,15 +581,13 @@ class BlueprintCfg:
         # we don't validate full instance here, only field.
 
     def __delattr__(self, name):
-        fields = getattr(self, "__blueprint_fields__", {})
-        if name in fields:
+        if name in self.__blueprint_fields__:
             raise AttributeError(f"Cannot delete field {repr(name)} of {self.__class__.__name__}")
         super().__delattr__(name)
 
     def __repr__(self):
-        fields = getattr(self, "__blueprint_fields__", {})
         field_strs = []
-        for name in fields:
+        for name in self.__blueprint_fields__:
             val = getattr(self, name)
             field_strs.append(f"{name}={repr(val)}")
         return f"{self.__class__.__name__}({', '.join(field_strs)})"
@@ -591,13 +595,13 @@ class BlueprintCfg:
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
-        fields = getattr(self, "__blueprint_fields__", {})
+        fields = self.__blueprint_fields__
         return all(getattr(self, name) == getattr(other, name) for name in fields)
 
     def __reduce__(self):
         """Supports copy.deepcopy() and pickle. Without this, the default object protocol
         reconstructs via cls.__new__(cls) (skipping __init__ and validation)"""
-        fields = getattr(self, "__blueprint_fields__", {})
+        fields = self.__blueprint_fields__
         kwargs = {name: self.__dict__[name] for name in fields if name in self.__dict__}
         return (_construct_blueprint_cfg, (type(self), kwargs))
 
@@ -657,7 +661,7 @@ def _format_wrap(opening: str, parts: list, closing: str, indent: int, linewidth
 
 def _format_value(value: Any, indent: int, linewidth: int, level: int) -> str:
     if isinstance(value, BlueprintCfg):
-        fields = getattr(value, "__blueprint_fields__", {})
+        fields = value.__blueprint_fields__
         parts = [
             f"{name}={_format_value(value.__dict__[name], indent, linewidth, level + 1)}"
             for name in fields
@@ -683,10 +687,7 @@ def _format_value(value: Any, indent: int, linewidth: int, level: int) -> str:
 
 def format(cfg: BlueprintCfg, indent: int = 2, linewidth: int = 120) -> str:
     """Pretty-prints a BlueprintCfg (and any nested configs/containers) as a
-    readable, deterministic string -- similar in spirit to `repr()`, but wraps
-    long lines: any container whose single-line rendering would exceed
-    `linewidth` characters is instead rendered with one element per line,
-    indented by `indent` spaces per nesting level."""
+    readable, deterministic string."""
     if not isinstance(cfg, BlueprintCfg):
         raise TypeError(f"format() expects a BlueprintCfg instance, got {type(cfg)}")
     return _format_value(cfg, indent, linewidth, 0)
