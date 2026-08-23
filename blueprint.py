@@ -1,12 +1,12 @@
+import contextlib
+import copy
 import enum
+import types
 import typing
-from datetime import datetime, timedelta
 from typing import (
     Any,
     Dict,
-    List,
     Literal,
-    Tuple,
     Union,
     get_args,
     get_origin,
@@ -42,7 +42,9 @@ class FieldInfo:
 
 def field(*, default=MISSING, default_factory=MISSING, description=None) -> Any:
     """Helper to define field metadata such as default values, factories, or descriptions."""
-    return FieldInfo(default=default, default_factory=default_factory, description=description)
+    return FieldInfo(
+        default=default, default_factory=default_factory, description=description
+    )
 
 
 def check_type(value: Any, expected_type: Any) -> bool:
@@ -61,13 +63,7 @@ def check_type(value: Any, expected_type: Any) -> bool:
         return check_type(value, args[0])
 
     # Handle Union and UnionType (e.g. Union[int, str] or int | str)
-    is_union = False
-    if origin is Union:
-        is_union = True
-    else:
-        tp_name = getattr(expected_type, "__class__", None).__name__
-        if tp_name == "UnionType":
-            is_union = True
+    is_union = origin is Union or isinstance(expected_type, types.UnionType)
 
     if is_union:
         return any(check_type(value, arg) for arg in args)
@@ -75,18 +71,6 @@ def check_type(value: Any, expected_type: Any) -> bool:
     # Handle Literal
     if origin is Literal:
         return any(type(value) is type(arg) and value == arg for arg in args)
-
-    # Normalize typing collection generics
-    if origin is not None:
-        try:
-            if origin is typing.List:
-                origin = list
-            elif origin is typing.Tuple:
-                origin = tuple
-            elif origin is typing.Dict:
-                origin = dict
-        except Exception:
-            pass
 
     # Handle Collection types (list, tuple, dict)
     if origin in (list, tuple, dict):
@@ -117,7 +101,10 @@ def check_type(value: Any, expected_type: Any) -> bool:
                 return False
             if args:
                 key_type, val_type = args
-                return all(check_type(k, key_type) and check_type(v, val_type) for k, v in value.items())
+                return all(
+                    check_type(k, key_type) and check_type(v, val_type)
+                    for k, v in value.items()
+                )
             return True
 
     # Handle Enum
@@ -138,16 +125,19 @@ def check_type(value: Any, expected_type: Any) -> bool:
     return False
 
 
-class ObservableList(list):
-    """A list proxy that converts and validates elements on modification, and triggers validation callbacks."""
-    def __init__(self, iterable, callback, item_type, converter_func):
-        self._callback = callback
+class ConfigList(list):
+    """A list proxy that converts and validates elements on modification.
+    Default is immutable, but can be made mutable, just as other classes.
+    """
+
+    _is_blueprint_mutable = False
+
+    def __init__(self, iterable, item_type):
         self._item_type = item_type
-        self._converter_func = converter_func
         # Convert initial items
         converted = []
         for item in iterable:
-            conv = converter_func(item, item_type, callback)
+            conv = _convert_value(item, item_type)
             if not check_type(conv, item_type):
                 raise TypeError(
                     f"Invalid item type: expected {item_type}, "
@@ -157,60 +147,80 @@ class ObservableList(list):
         super().__init__(converted)
 
     def _convert_and_validate(self, item):
-        conv = self._converter_func(item, self._item_type, self._callback)
+        conv = _convert_value(item, self._item_type)
         if not check_type(conv, self._item_type):
             raise TypeError(
                 f"Invalid item type: expected {self._item_type}, "
                 f"got {type(conv).__name__} ({repr(conv)})"
             )
+        # Reached only after __assert_mutable() already passed (see append/extend/insert/
+        # __setitem__ below), so cascade mutability onto any freshly-created nested value too,
+        # for the rest of the current mutable_copy() block.
+        for node in _flat_iter_containers(conv):
+            _set_mutable(node, True)
         return conv
 
     def append(self, item):
+        self.__assert_mutable()
         super().append(self._convert_and_validate(item))
-        self._callback()
 
     def extend(self, iterable):
+        self.__assert_mutable()
         converted = [self._convert_and_validate(item) for item in iterable]
         super().extend(converted)
-        self._callback()
 
     def insert(self, index, item):
+        self.__assert_mutable()
         super().insert(index, self._convert_and_validate(item))
-        self._callback()
 
     def __setitem__(self, index, val):
+        self.__assert_mutable()
         if isinstance(index, slice):
             converted = [self._convert_and_validate(item) for item in val]
             super().__setitem__(index, converted)
         else:
             super().__setitem__(index, self._convert_and_validate(val))
-        self._callback()
 
     def pop(self, index=-1):
-        val = super().pop(index)
-        self._callback()
-        return val
+        self.__assert_mutable()
+        return super().pop(index)
 
     def remove(self, item):
+        self.__assert_mutable()
         super().remove(item)
-        self._callback()
 
     def clear(self):
+        self.__assert_mutable()
         super().clear()
-        self._callback()
 
     def __delitem__(self, index):
+        self.__assert_mutable()
         super().__delitem__(index)
-        self._callback()
+
+    def __assert_mutable(self):
+        if not self._is_blueprint_mutable:
+            raise AttributeError(
+                "Cannot modify ConfigList outside of a mutable_copy() block"
+            )
+
+    def __reduce__(self):
+        """Supports copy.deepcopy() and pickle. Without this, both fall back to the default
+        list-subclass protocol, which reconstructs via an empty instance plus extend() -- and
+        extend() is mutation-guarded, so it raises on the not-yet-mutable fresh instance.
+        Reconstructing through the constructor instead re-runs item conversion/validation."""
+        return (ConfigList, (list(self), self._item_type))
 
 
-class ObservableDict(dict):
-    """A dict proxy that converts and validates keys/values on modification, and triggers validation callbacks."""
-    def __init__(self, mapping_or_iterable, callback, key_type, value_type, converter_func):
-        self._callback = callback
+class ConfigDict(dict):
+    """A dict proxy that converts and validates keys/values on modification.
+    Default is immutable, but can be made mutable, just as other classes.
+    """
+
+    _is_blueprint_mutable = False
+
+    def __init__(self, mapping_or_iterable, key_type, value_type):
         self._key_type = key_type
         self._value_type = value_type
-        self._converter_func = converter_func
 
         if isinstance(mapping_or_iterable, dict):
             iterable = mapping_or_iterable.items()
@@ -224,7 +234,7 @@ class ObservableDict(dict):
                     f"Invalid key type: expected {key_type}, "
                     f"got {type(k).__name__} ({repr(k)})"
                 )
-            conv_v = converter_func(v, value_type, callback)
+            conv_v = _convert_value(v, value_type)
             if not check_type(conv_v, value_type):
                 raise TypeError(
                     f"Invalid value type: expected {value_type}, "
@@ -241,24 +251,24 @@ class ObservableDict(dict):
             )
 
     def _convert_and_validate_val(self, value):
-        conv = self._converter_func(value, self._value_type, self._callback)
+        conv = _convert_value(value, self._value_type)
         if not check_type(conv, self._value_type):
             raise TypeError(
-                f"Invalid value type: expected {self._value_type}, "
-                f"got {type(conv).__name__} ({repr(value)})"
+                f"Invalid value type: expected {self._value_type}, got {repr(conv)}"
             )
         return conv
 
     def __setitem__(self, key, value):
+        self.__assert_mutable()
         self._validate_key(key)
         super().__setitem__(key, self._convert_and_validate_val(value))
-        self._callback()
 
     def __delitem__(self, key):
+        self.__assert_mutable()
         super().__delitem__(key)
-        self._callback()
 
     def update(self, *args, **kwargs):
+        self.__assert_mutable()
         temp = {}
         if args:
             if len(args) > 1:
@@ -277,56 +287,150 @@ class ObservableDict(dict):
             temp[k] = self._convert_and_validate_val(v)
 
         super().update(temp)
-        self._callback()
 
     def clear(self):
+        self.__assert_mutable()
         super().clear()
-        self._callback()
 
     def pop(self, key, *args):
-        val = super().pop(key, *args)
-        self._callback()
-        return val
+        self.__assert_mutable()
+        return super().pop(key, *args)
 
     def popitem(self):
-        val = super().popitem()
-        self._callback()
-        return val
+        self.__assert_mutable()
+        return super().popitem()
 
     def setdefault(self, key, default=None):
         if key not in self:
-            self[key] = default
+            self[key] = default  # assignment checks mutability
         return self[key]
 
+    def __assert_mutable(self):
+        if not self._is_blueprint_mutable:
+            raise AttributeError(
+                "Cannot modify ConfigDict outside of a mutable_copy() block"
+            )
 
-@dataclass_transform(
-    kw_only_default=True,
-    field_specifiers=(field,)
-)
+    def __reduce__(self):
+        """Supports copy.deepcopy() and pickle -- see ConfigList.__reduce__ for why this is
+        needed (same issue, dict subclass instead of list)."""
+        return (ConfigDict, (dict(self), self._key_type, self._value_type))
+
+
+def _set_mutable(node, mutable):
+    node.__dict__["_is_blueprint_mutable"] = mutable
+
+
+def _flat_iter_containers(value):
+    """Post-order walk of container hierarchy"""
+    if isinstance(value, BlueprintCfg):
+        for name in getattr(value, "__blueprint_fields__", {}):
+            child = value.__dict__.get(name, MISSING)
+            if child is not MISSING:
+                yield from _flat_iter_containers(child)
+        yield value
+    elif isinstance(value, ConfigList):
+        for item in value:
+            yield from _flat_iter_containers(item)
+        yield value
+    elif isinstance(value, ConfigDict):
+        for item in value.values():
+            yield from _flat_iter_containers(item)
+        yield value
+    elif isinstance(value, tuple):
+        for item in value:
+            yield from _flat_iter_containers(item)
+    # list/dict can't appear here, and are expected to be converted before calling this func
+
+
+def _construct_blueprint_cfg(cls, kwargs):
+    """Reconstruction helper for BlueprintCfg.__reduce__. pickle/copy.deepcopy's reduce
+    protocol always calls the reconstruction callable with positional args, but BlueprintCfg
+    subclasses only accept keyword arguments"""
+    return cls(**kwargs)
+
+
+def _convert_value(value, expected_type):
+    """Recursively converts lists/tuples/dicts into their internal ConfigList/ConfigDict/tuple
+    representation. A field typed as a BlueprintCfg subclass is passed through unchanged -- it
+    must already be an instance of the right class; dict inputs are not auto-converted into one
+    (check_type()/_validate_self() rejects anything else with a clear TypeError).
+
+    Shall be run only within "mutable" context.
+    """
+    origin = get_origin(expected_type)
+    args = get_args(expected_type)
+
+    # Handle Annotated
+    if origin is Annotated:
+        expected_type = args[0]
+        origin = get_origin(expected_type)
+        args = get_args(expected_type)
+
+    if origin is list:
+        if isinstance(value, list):
+            item_type = args[0] if args else Any
+            return ConfigList(value, item_type)
+        return value
+
+    if origin is tuple:
+        if isinstance(value, tuple):
+            if args:
+                if len(args) == 2 and args[1] is Ellipsis:
+                    item_type = args[0]
+                    return tuple(_convert_value(item, item_type) for item in value)
+                if len(value) != len(args):
+                    raise TypeError(
+                        f"Invalid number of elements for {expected_type}: "
+                        f"expected {len(args)}, got {len(value)} ({repr(value)})"
+                    )
+                return tuple(
+                    _convert_value(item, arg)
+                    for item, arg in zip(value, args, strict=True)
+                )
+            return value
+
+    if origin is dict:
+        if isinstance(value, dict):
+            key_type = args[0] if args and len(args) >= 1 else Any
+            val_type = args[1] if args and len(args) >= 2 else Any
+            return ConfigDict(value, key_type, val_type)
+        return value
+
+    return value
+
+
+@dataclass_transform(kw_only_default=True, field_specifiers=(field,))
 class BlueprintCfg:
     __blueprint_fields__: Dict[str, FieldInfo] = {}
+    # allows mutations on this instance; mutable_copy() cascades this to the whole
+    # nested tree (see _iter_containers/_set_mutable), so children get their own flag too
+    _is_blueprint_mutable = False
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
         combined_fields = {}
 
-        # 1. Inherit fields from parents in MRO (parents evaluated first so subclasses override them)
+        # Inherit fields from parents in MRO (parents evaluated first so subclasses override them)
         for base in reversed(cls.__mro__):
             if base is object or base is BlueprintCfg:
                 continue
             if hasattr(base, "__blueprint_fields__"):
                 combined_fields.update(base.__blueprint_fields__)
 
-        # 2. Get local type annotations
+        # Get local type annotations
+        _local_annotations = getattr(cls, "__annotations__", {})
         try:
-            local_annotations = getattr(cls, "__annotations__", {})
-            resolved_hints = typing.get_type_hints(cls, include_extras=True)
-            annotations = {k: resolved_hints[k] for k in local_annotations if k in resolved_hints}
-        except Exception:
-            annotations = local_annotations
+            _resolved_hints = typing.get_type_hints(cls, include_extras=True)
+            # replace with resolved hints if those are available
+            annotations = {**_local_annotations, **_resolved_hints}
+        except (
+            NameError
+        ):  # in case forward-references can't be resovled, or "a local class"
+            annotations = _local_annotations
 
-        # 3. Process field metadata and defaults
+        # Process field metadata and defaults
         for name, annotated_type in annotations.items():
             if name.startswith("_"):
                 continue
@@ -374,7 +478,7 @@ class BlueprintCfg:
             combined_fields[name] = FieldInfo(
                 default=default,
                 default_factory=default_factory,
-                description=description
+                description=description,
             )
             combined_fields[name].type = actual_type
 
@@ -387,7 +491,7 @@ class BlueprintCfg:
                     else:
                         delattr(cls, name)
 
-        # 4. Handle overridden fields without local type annotations
+        # Handle overridden fields without local type annotations
         for name in combined_fields:
             if name in cls.__dict__ and name not in annotations:
                 val = cls.__dict__[name]
@@ -409,18 +513,20 @@ class BlueprintCfg:
         cls.__blueprint_fields__ = combined_fields
 
     if not typing.TYPE_CHECKING:
+        # type checking sees dataclass transform
+        # but we need to add a validation layer.
         def __init__(self, **kwargs):
             fields = self.__blueprint_fields__
 
             # Validate that all arguments passed are recognized fields
             extra = set(kwargs.keys()) - set(fields.keys())
             if extra:
-                raise TypeError(f"__init__() got unexpected keyword arguments: {', '.join(map(repr, sorted(extra)))}")
+                raise TypeError(
+                    f"__init__() got unexpected keyword arguments: {', '.join(map(repr, sorted(extra)))}"
+                )
 
             # Initialize private state
             self.__dict__["_initialized"] = False
-            self.__dict__["_change_callbacks"] = []
-            self.__dict__["_in_validation"] = False
 
             # Populate fields
             for name, field_info in fields.items():
@@ -431,124 +537,27 @@ class BlueprintCfg:
                 elif field_info.default_factory is not MISSING:
                     val = field_info.default_factory()
                 else:
-                    raise TypeError(f"__init__() missing required keyword-only argument: {repr(name)}")
+                    raise TypeError(
+                        f"__init__() missing required keyword-only argument: {repr(name)}"
+                    )
 
-                # Convert dicts or register callbacks recursively
-                val = self._convert_value(val, field_info.type, self._validate_all)
+                val = _convert_value(val, field_info.type)
                 self.__dict__[name] = val
 
             self.__dict__["_initialized"] = True
-            self._validate_all()
+            self._validate_self()
 
-    def _convert_value(self, value, expected_type, callback):
-        """Recursively converts input dicts into target BlueprintCfg classes and wraps lists/dicts in observable proxies."""
-        origin = get_origin(expected_type)
-        args = get_args(expected_type)
-
-        # Handle Annotated
-        if origin is Annotated:
-            expected_type = args[0]
-            origin = get_origin(expected_type)
-            args = get_args(expected_type)
-
-        # 1. Direct BlueprintCfg subclass
-        if isinstance(expected_type, type) and issubclass(expected_type, BlueprintCfg):
-            if isinstance(value, dict):
-                inst = expected_type(**value)
-                inst._register_change_callback(callback)
-                return inst
-            elif isinstance(value, BlueprintCfg):
-                value._register_change_callback(callback)
-                return value
-            return value
-
-        # 2. Union / UnionType
-        is_union = False
-        if origin is Union:
-            is_union = True
-        else:
-            tp_name = getattr(expected_type, "__class__", None).__name__
-            if tp_name == "UnionType":
-                is_union = True
-
-        if is_union:
-            cfg_types = [arg for arg in args if isinstance(arg, type) and issubclass(arg, BlueprintCfg)]
-            if len(cfg_types) == 1 and isinstance(value, dict):
-                try:
-                    inst = cfg_types[0](**value)
-                    inst._register_change_callback(callback)
-                    return inst
-                except Exception:
-                    pass
-            elif len(cfg_types) > 1 and isinstance(value, dict):
-                for cfg_type in cfg_types:
-                    cfg_fields = getattr(cfg_type, "__blueprint_fields__", {})
-                    if set(value.keys()).issubset(set(cfg_fields.keys())):
-                        try:
-                            inst = cfg_type(**value)
-                            inst._register_change_callback(callback)
-                            return inst
-                        except Exception:
-                            continue
-            if isinstance(value, BlueprintCfg):
-                value._register_change_callback(callback)
-            return value
-
-        # 3. Collection types
-        if origin is list:
-            if isinstance(value, list):
-                item_type = args[0] if args else Any
-                return ObservableList(value, callback, item_type, self._convert_value)
-            return value
-
-        elif origin is tuple:
-            if isinstance(value, tuple):
-                if args:
-                    if len(args) == 2 and args[1] is Ellipsis:
-                        item_type = args[0]
-                        return tuple(self._convert_value(item, item_type, callback) for item in value)
-                    return tuple(
-                        self._convert_value(item, arg, callback)
-                        for item, arg in zip(value, args)
-                    )
-                return value
-
-        elif origin is dict:
-            if isinstance(value, dict):
-                key_type = args[0] if args and len(args) >= 1 else Any
-                val_type = args[1] if args and len(args) >= 2 else Any
-                return ObservableDict(value, callback, key_type, val_type, self._convert_value)
-            return value
-
-        return value
-
-    def _register_change_callback(self, callback):
-        callbacks = self.__dict__.get("_change_callbacks", [])
-        if callback not in callbacks:
-            callbacks.append(callback)
-
-    def _notify_change(self):
-        for cb in self.__dict__.get("_change_callbacks", []):
-            cb()
-
-    def _validate_all(self):
-        """Validates all field types and triggers the custom validation check() hook."""
-        if self.__dict__.get("_in_validation", False):
-            return
-        self.__dict__["_in_validation"] = True
-        try:
-            fields = getattr(self, "__blueprint_fields__", {})
-            for name, field_info in fields.items():
-                value = getattr(self, name)
-                if not check_type(value, field_info.type):
-                    raise TypeError(
-                        f"Invalid type for field {repr(name)} in {self.__class__.__name__}. "
-                        f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})"
-                    )
-            self.check()
-            self._notify_change()
-        finally:
-            self.__dict__["_in_validation"] = False
+    def _validate_self(self):
+        """Non-recursive validation (all fields + self.check())."""
+        fields = getattr(self, "__blueprint_fields__", {})
+        for name, field_info in fields.items():
+            value = getattr(self, name)
+            if not check_type(value, field_info.type):
+                raise TypeError(
+                    f"Invalid type for field {repr(name)} in {self.__class__.__name__}. "
+                    f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})"
+                )
+        self.check()
 
     def check(self):
         """Custom post-validation hook. Subclasses override this to implement cross-field checks."""
@@ -562,10 +571,20 @@ class BlueprintCfg:
                 return
             raise AttributeError(f"{self.__class__.__name__} has no field {repr(name)}")
 
-        field_info = fields[name]
-        value = self._convert_value(value, field_info.type, self._validate_all)
+        if not self._is_blueprint_mutable:
+            raise AttributeError(
+                f"Cannot assign to field {repr(name)} of {self.__class__.__name__} outside "
+                f"of a mutable_copy() block"
+            )
 
-        # Validate the new value type before assigning
+        field_info = fields[name]
+        value = _convert_value(value, field_info.type)
+        # We already know we're mutable here (checked above), so cascade that onto any
+        # freshly-created or freshly-attached nested value too, for the rest of this block.
+        for node in _flat_iter_containers(value):
+            _set_mutable(node, True)
+
+        # Field-level checks run always
         if not check_type(value, field_info.type):
             raise TypeError(
                 f"Invalid type for field {repr(name)} in {self.__class__.__name__}. "
@@ -573,14 +592,14 @@ class BlueprintCfg:
             )
 
         super().__setattr__(name, value)
-
-        if self.__dict__.get("_initialized", False):
-            self._validate_all()
+        # we don't validate full instance here, only field.
 
     def __delattr__(self, name):
         fields = getattr(self, "__blueprint_fields__", {})
         if name in fields:
-            raise AttributeError(f"Cannot delete field {repr(name)} of {self.__class__.__name__}")
+            raise AttributeError(
+                f"Cannot delete field {repr(name)} of {self.__class__.__name__}"
+            )
         super().__delattr__(name)
 
     def __repr__(self):
@@ -596,3 +615,42 @@ class BlueprintCfg:
             return NotImplemented
         fields = getattr(self, "__blueprint_fields__", {})
         return all(getattr(self, name) == getattr(other, name) for name in fields)
+
+    def __reduce__(self):
+        """Supports copy.deepcopy() and pickle. Without this, the default object protocol
+        reconstructs via cls.__new__(cls) (skipping __init__ and validation)"""
+        fields = getattr(self, "__blueprint_fields__", {})
+        kwargs = {name: self.__dict__[name] for name in fields if name in self.__dict__}
+        return (_construct_blueprint_cfg, (type(self), kwargs))
+
+    @contextlib.contextmanager
+    def mutable_copy(self):
+        """Context manager yielding an independent, deep, mutable copy of this instance.
+
+            with x.mutable_copy() as y:
+                y.some_field = ...
+                y.child.name = "..."       # cascades: nested configs are mutable too
+                y.children.append(...)     # ...and so are nested list/dict fields
+
+        Result is (recursively) validated at exit.
+        """
+        # this includes full validation of result
+        clone = copy.deepcopy(self)
+
+        initial_mutables = []
+        for node in _flat_iter_containers(clone):
+            initial_mutables.append(node)
+            _set_mutable(node, True)
+
+        try:
+            yield clone
+        except BaseException:
+            raise
+        finally:
+            # reset to immutable, protection for the case of mutables
+            for node in initial_mutables:
+                _set_mutable(node, False)
+            for node in _flat_iter_containers(clone):
+                _set_mutable(node, False)
+                if isinstance(node, BlueprintCfg):
+                    node._validate_self()

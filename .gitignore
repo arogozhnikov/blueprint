@@ -3,3 +3,5 @@
 __pychache__
 scratch
 *.pyc
+# mac stuff
+.DS_store 
