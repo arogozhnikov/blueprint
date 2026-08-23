@@ -19,6 +19,8 @@ from ._blueprint import (
     FieldInfo,
     InvalidBlueprintError,
     check_type,
+    dangerously_all_mutable,
+    debug_prohibit_mutability,
     field,
     format,
 )
@@ -31,6 +33,8 @@ __all__ = [
     "InvalidBlueprintError",
     "MISSING",
     "check_type",
+    "dangerously_all_mutable",
+    "debug_prohibit_mutability",
     "field",
     "format",
 ]

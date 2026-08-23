@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling~=1.25"]
 build-backend = "hatchling.build"
 
 [project]
@@ -9,7 +9,7 @@ description = "Typed, immutable-by-default config objects for Python."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [
-    { name = "Alex"},
+    { name = "Alex Rogozhnikov"},
 ]
 keywords = ["config", "configuration", "dataclass", "typing", "validation", "immutable"]
 classifiers = [

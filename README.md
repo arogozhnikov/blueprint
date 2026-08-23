@@ -8,6 +8,13 @@ and the only way to change one is through an explicit `mutable_copy()`
 block, which hands you an independent, deep, mutable copy and re-validates
 it when the block exits.
 
+There are multiple config methods, they mostly address wrong problems.
+
+Blueprint focuses on these three: 
+- helpful (though not exhaustive) typechecking,
+- compositionaly of configs with complex code-level logic,
+- reliability
+
 ## Install
 
 This project isn't published to PyPI yet. Install it from a local checkout:
@@ -75,41 +82,92 @@ class ServiceCfg(BlueprintCfg):
 svc = ServiceCfg(name="api", endpoints=["https://a.example"])
 
 with svc.mutable_copy() as svc2:
-    svc2.retry.max_attempts = 5        # nested config, no extra mutable_copy() needed
+    svc2.name = 'other-api'
+    svc2.retry.max_attempts = 5 # can modify nested fields
     svc2.endpoints.append("https://b.example")
 
 print(blueprint.format(svc2))
 # ServiceCfg(
-#   name='api',
+#   name='other-api',
 #   retry=RetryCfg(max_attempts=5, backoff=1.5),
 #   endpoints=['https://a.example', 'https://b.example'],
 # )
 ```
 
-## Errors
+## Important gothas
 
-Field type-check failures raise `InvalidBlueprintError` (a `TypeError`
-subclass, so existing `except TypeError` handling keeps working). Its
-`errors` attribute lists every field that failed, not just the first one:
+Everything that goes into config (in constructor or by assignment) 
+is immediately cloned, and has no link connections to previously existing objects.
 
 ```python
-from blueprint import InvalidBlueprintError
+source_tags = ["a", "b"]
+cfg = ServerCfg(tags=source_tags)
 
-try:
-    ServerCfg(host=123, port="oops")
-except InvalidBlueprintError as e:
-    print(e.errors)  # one message per bad field
+source_tags.append("c")  # mutating the list *after* construction...
+assert cfg.tags == ["a", "b"]  # ...never shows up in cfg -- its own copy was made
+
+# same story for nested BlueprintCfg instances and for mid-mutable_copy() assignment:
+retry = RetryCfg(max_attempts=1)
+with ServiceCfg(name="api", retry=retry).mutable_copy() as svc2:
+    svc2.retry.max_attempts = 99
+assert retry.max_attempts == 1  # the object `retry` still points at is untouched
 ```
+
+Returned lists / dicts fields are not lists, but their immutable subclasses.
+This is usually correct decision, as you should not modify configs or config fields, but also can be confusing if some deeper code assumes the list is modifiable.
+
+There is no yaml/json serialization, on purpose. 
+There is a readable reproducible formatting, also on purpose.
+
+## Errors
+
+Field type-check failures raise `InvalidBlueprintError`:
+
+```python
+# next line raises InvalidBlueprintError
+ServerCfg(host=123, port="oops")
+```
+
+Output (note there is a line for every exception):
+# TODO make every problem problem produce independent line.
+
+```
+blueprint._blueprint.InvalidBlueprintError: Invalid type for field 'host' in ServerCfg. Expected <class 'str'>, got int (123); Invalid type for field 'port' in ServerCfg. Expected <class 'int'>, got str ('oops')
+```
+
 
 `check()` failures (like the `port out of range` example above) are raised
 as whatever exception your `check()` method raises -- they aren't wrapped.
 
-If a `mutable_copy()` block raises an unrelated exception while the config
-is left in a temporarily-invalid cross-field state, that state is no longer
-re-raised as a replacement exception: a `UserWarning` is emitted instead,
-and the original exception keeps propagating with its original type. See
-the inline comments around `mutable_copy()` in `src/blueprint/_blueprint.py`
-for more detail.
+## Escape hatches
+
+Two global context managers are available for when the frozen-by-default model gets in the
+way. Both are process-wide (not scoped to one instance) and nestable.
+
+```python
+import blueprint
+
+# Mutate objects directly and in place, bypassing mutable_copy() entirely. Useful for
+# incremental construction or quick experiments -- but note this mutates the object itself
+# (no copy), visible to every other reference to it, unlike mutable_copy().
+with blueprint.dangerously_all_mutable():
+    cfg.port = 9000
+
+# Assert that some region of code never mutates configs: any mutable_copy() call inside
+# the block raises RuntimeError instead of yielding a copy.
+with blueprint.debug_prohibit_mutability():
+    with cfg.mutable_copy() as y:  # raises RuntimeError
+        ...
+```
+
+## Example
+
+`examples/example.py` is a runnable, commented tour of everything above (and is covered by
+a test that runs it, so it can't silently drift out of date):
+
+```bash
+python examples/example.py
+```
 
 
 ## Development

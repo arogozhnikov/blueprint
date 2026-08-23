@@ -1,4 +1,3 @@
-from xml.dom import ValidationErr
 import contextlib
 import copy
 import enum
@@ -23,6 +22,8 @@ __all__ = [
     "InvalidBlueprintError",
     "MISSING",
     "check_type",
+    "dangerously_all_mutable",
+    "debug_prohibit_mutability",
     "field",
     "format",
 ]
@@ -34,15 +35,55 @@ class MissingType:
 
 
 class InvalidBlueprintError(TypeError):
-    """Raised by `_validate_self()` when one or more fields fail their type check.
-    """
+    """Raised by `_validate_self()` when one or more fields fail their type check."""
 
-    def __init__(self, errors: list[str]): # change to tuple[str, ....]
+    def __init__(self, errors: list[str]):  # change to tuple[str, ....]
         self.errors = errors
         super().__init__("; ".join(errors))
 
 
 MISSING = MissingType()
+
+
+# Depth counters backing the two global escape hatches below. Plain module-level ints (not
+# contextvars) are enough here: like the rest of blueprint, these are not designed to be
+# thread-safe, and nesting is handled by incrementing/decrementing rather than storing a bool,
+# so nested `with` blocks of the same kind compose correctly.
+class _BlueprintState:
+    _global_mutable_depth = 0
+    _global_prohibit_mutability_depth = 0
+
+
+@contextlib.contextmanager
+def dangerously_all_mutable():
+    """Context manager that makes *every* BlueprintCfg / ConfigList / ConfigDict instance
+    mutable for as long as it's active, regardless of whether it came from `mutable_copy()`.
+
+        cfg = ServerCfg(host="localhost", port=8080)
+        with blueprint.dangerously_all_mutable():
+            cfg.port = 9000  # normally raises AttributeError -- allowed here
+    """
+    _BlueprintState._global_mutable_depth += 1
+    try:
+        yield
+    finally:
+        _BlueprintState._global_mutable_depth -= 1
+
+
+@contextlib.contextmanager
+def debug_prohibit_mutability():
+    """Debug helper: while active, any call to `mutable_copy()` (on any instance) raises
+    `RuntimeError` instead of yielding a mutable copy. Recommended only for debugging.
+
+        with blueprint.debug_prohibit_mutability():
+            with cfg.mutable_copy() as y:  # raises RuntimeError immediately
+                ...
+    """
+    _BlueprintState._global_prohibit_mutability_depth += 1
+    try:
+        yield
+    finally:
+        _BlueprintState._global_prohibit_mutability_depth -= 1
 
 
 class FieldInfo:
@@ -207,7 +248,7 @@ class ConfigList(list):
         super().__delitem__(index)
 
     def __assert_mutable(self):
-        if not self._is_blueprint_mutable:
+        if not (self._is_blueprint_mutable or  _BlueprintState._global_mutable_depth > 0):
             raise AttributeError("Cannot modify ConfigList outside of a mutable_copy() block")
 
     def __reduce__(self):
@@ -308,7 +349,7 @@ class ConfigDict(dict):
         return self[key]
 
     def __assert_mutable(self):
-        if not self._is_blueprint_mutable:
+        if not (self._is_blueprint_mutable or _BlueprintState._global_mutable_depth > 0):
             raise AttributeError("Cannot modify ConfigDict outside of a mutable_copy() block")
 
     def __reduce__(self):
@@ -572,7 +613,7 @@ class BlueprintCfg:
                 return
             raise AttributeError(f"{self.__class__.__name__} has no field {repr(name)}")
 
-        if not self._is_blueprint_mutable:
+        if not (self._is_blueprint_mutable or _BlueprintState._global_mutable_depth > 0):
             raise AttributeError(
                 f"Cannot assign to field {repr(name)} of {self.__class__.__name__} outside of a mutable_copy() block"
             )
@@ -632,6 +673,11 @@ class BlueprintCfg:
 
         Result is (recursively) validated at exit.
         """
+        if _BlueprintState._global_prohibit_mutability_depth > 0:
+            raise RuntimeError(
+                f"mutable_copy() was called on a {self.__class__.__name__} inside a debug_prohibit_mutability() block"
+            )
+
         # this includes full validation of result
         clone = copy.deepcopy(self)
 
@@ -658,17 +704,22 @@ class BlueprintCfg:
                 for node in _flat_iter_containers(clone):
                     if isinstance(node, BlueprintCfg):
                         node._validate_self()
-            except BaseException:
+            except BaseException as new_validation_error:
                 if exception is None:
                     raise
                 else:
-                    # just warn about new problematic class
+                    # An exception was already propagating out of the `with` block (`exception`);
+                    # don't let this secondary validation failure during cleanup mask it -- just
+                    # warn about it. Note: we deliberately do NOT `return` here -- a `return`
+                    # inside a `finally` block silently swallows any exception that was
+                    # propagating through it, which would suppress `exception` instead of letting
+                    # it keep propagating as intended.
                     warnings.warn(
                         f"{clone.__class__.__name__} was left in an invalid state after "
-                        f"mutable_copy() exited because of {exception!r}: {new_validation_error}",
+                        f"mutable_copy() exited because of {exception!r}: {new_validation_error!r}",
                         stacklevel=2,
-                    )                    
-                    return # keep propagating previous exception
+                    )
+                    # just keep propagating previous exception
 
 
 def _format_leaf(value: Any) -> str:

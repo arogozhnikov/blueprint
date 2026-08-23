@@ -6,6 +6,7 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
+import blueprint
 from blueprint import BlueprintCfg, ConfigDict, ConfigList, InvalidBlueprintError, field
 
 
@@ -886,6 +887,140 @@ class TestMutableCopyExceptionHandling(unittest.TestCase):
                 with cfg.mutable_copy() as y:
                     y.min_val = 25  # leaves y invalid, block itself doesn't raise
         self.assertEqual(cfg.min_val, 10)
+
+
+class TestDangerouslyAllMutable(unittest.TestCase):
+    """Covers: the `dangerously_all_mutable()` global escape hatch."""
+
+    def test_field_assignment_allowed_inside_block(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.dangerously_all_mutable():
+            x.value = 2
+        self.assertEqual(x.value, 2)
+
+    def test_mutation_is_in_place_not_on_a_copy(self):
+        # Unlike mutable_copy(), this mutates the original object itself.
+        x = ChildCfg(name="A", value=1)
+        with blueprint.dangerously_all_mutable():
+            x.value = 2
+            same_object = x
+            same_object.value = 3
+        self.assertEqual(x.value, 3)
+
+    def test_assignment_prohibited_again_after_block_exits(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.dangerously_all_mutable():
+            x.value = 2
+        with self.assertRaises(AttributeError):
+            x.value = 3
+        self.assertEqual(x.value, 2)
+
+    def test_list_and_dict_fields_mutable_inside_block(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x"])
+        with blueprint.dangerously_all_mutable():
+            p.tag_list.append("y")
+        self.assertEqual(p.tag_list, ["x", "y"])
+        with self.assertRaises(AttributeError):
+            p.tag_list.append("z")
+
+    def test_nestable(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.dangerously_all_mutable():
+            with blueprint.dangerously_all_mutable():
+                x.value = 2
+            # still inside the outer block -- mutation still allowed
+            x.value = 3
+        self.assertEqual(x.value, 3)
+        with self.assertRaises(AttributeError):
+            x.value = 4
+
+    def test_field_level_type_checks_still_apply(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.dangerously_all_mutable():
+            with self.assertRaises(TypeError):
+                x.value = "not an int"
+
+
+class TestDebugProhibitMutability(unittest.TestCase):
+    """Covers: the `debug_prohibit_mutability()` global escape hatch."""
+
+    def test_mutable_copy_raises_inside_block(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.debug_prohibit_mutability():
+            with self.assertRaises(RuntimeError):
+                with x.mutable_copy():
+                    pass
+
+    def test_mutable_copy_works_again_after_block_exits(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.debug_prohibit_mutability():
+            with self.assertRaises(RuntimeError):
+                with x.mutable_copy():
+                    pass
+        with x.mutable_copy() as y:
+            y.value = 2
+        self.assertEqual(y.value, 2)
+
+    def test_nestable(self):
+        x = ChildCfg(name="A", value=1)
+        with blueprint.debug_prohibit_mutability():
+            with blueprint.debug_prohibit_mutability():
+                with self.assertRaises(RuntimeError):
+                    with x.mutable_copy():
+                        pass
+            # still inside the outer block
+            with self.assertRaises(RuntimeError):
+                with x.mutable_copy():
+                    pass
+        with x.mutable_copy() as y:
+            y.value = 2
+        self.assertEqual(y.value, 2)
+
+    def test_independent_from_dangerously_all_mutable(self):
+        # dangerously_all_mutable() allows direct attribute assignment, but does not bypass
+        # debug_prohibit_mutability()'s block on mutable_copy() itself.
+        x = ChildCfg(name="A", value=1)
+        with blueprint.debug_prohibit_mutability():
+            with blueprint.dangerously_all_mutable():
+                x.value = 2  # allowed: direct assignment, not via mutable_copy()
+                with self.assertRaises(RuntimeError):
+                    with x.mutable_copy():
+                        pass
+        self.assertEqual(x.value, 2)
+
+
+class TestExampleScript(unittest.TestCase):
+    """Covers: `examples/example.py` stays in sync with the library and runs cleanly."""
+
+    def test_example_runs_without_errors(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        example_path = repo_root / "examples" / "example.py"
+        self.assertTrue(example_path.exists(), f"expected {example_path} to exist")
+
+        env = dict(**__import__("os").environ)
+        # Make sure the example imports this checkout's `blueprint`, not some other
+        # installed version, regardless of whether the package is pip-installed.
+        src_path = str(repo_root / "src")
+        env["PYTHONPATH"] = src_path + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+
+        result = subprocess.run(
+            [sys.executable, str(example_path)],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"examples/example.py exited with {result.returncode}\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}",
+        )
 
 
 if __name__ == "__main__":
