@@ -1,10 +1,11 @@
-import unittest
 import copy
 import enum
 import pickle
+import unittest
 from datetime import datetime, timedelta
-from typing import Union, Literal, Annotated
-from blueprint import BlueprintCfg, field
+from typing import Annotated, Literal
+
+from blueprint import BlueprintCfg, ConfigDict, ConfigList, field
 
 
 class Color(enum.Enum):
@@ -92,9 +93,7 @@ class TestBlueprintCfg(unittest.TestCase):
 
         now = datetime.now()
         delta = timedelta(days=1)
-        cfg = AllBasicCfg(
-            b=b"hello", s="world", i=42, bo=True, dt=now, td=delta, n=None
-        )
+        cfg = AllBasicCfg(b=b"hello", s="world", i=42, bo=True, dt=now, td=delta, n=None)
         self.assertEqual(cfg.b, b"hello")
         self.assertEqual(cfg.s, "world")
         self.assertEqual(cfg.i, 42)
@@ -114,7 +113,7 @@ class TestBlueprintCfg(unittest.TestCase):
 
     def test_union_types(self):
         class UnionCfg(BlueprintCfg):
-            opt: Union[int, None]
+            opt: int | None
             multi: int | str
 
         cfg = UnionCfg(opt=None, multi="hello")
@@ -241,13 +240,40 @@ class TestBlueprintCfg(unittest.TestCase):
         with self.assertRaises(AttributeError):
             y.ints.append(5)
 
+    def test_bare_collection_annotations_are_still_wrapped(self):
+        # Bare `list`/`dict`/`tuple` (no subscript) used to bypass the ConfigList/ConfigDict
+        # proxy entirely -- get_origin() returns None for them (unlike typing.List/Dict/Tuple
+        # or a subscripted list[...]/dict[...]), so they fell through _convert_value()
+        # unconverted and allowed direct mutation outside mutable_copy(). They should behave
+        # just like their Any-typed parameterized form: list[Any], dict[Any, Any], tuple.
+        class BareCollectionsCfg(BlueprintCfg):
+            items: list
+            mapping: dict
+            pair: tuple
+
+        cfg = BareCollectionsCfg(items=[1, "two", 3.0], mapping={"a": 1}, pair=(1, "x"))
+        self.assertIsInstance(cfg.items, ConfigList)
+        self.assertIsInstance(cfg.mapping, ConfigDict)
+
+        with self.assertRaises(AttributeError):
+            cfg.items.append(4)
+        with self.assertRaises(AttributeError):
+            cfg.mapping["b"] = 2
+
+        with cfg.mutable_copy() as y:
+            y.items.append(4)
+            y.mapping["b"] = 2
+        self.assertEqual(y.items, [1, "two", 3.0, 4])
+        self.assertEqual(y.mapping, {"a": 1, "b": 2})
+        # original untouched
+        self.assertEqual(cfg.items, [1, "two", 3.0])
+        self.assertEqual(cfg.mapping, {"a": 1})
+
     def test_nested_configs_in_collections(self):
         class ConfigListCfg(BlueprintCfg):
             children: list[ChildCfg]
 
-        cfg = ConfigListCfg(
-            children=[ChildCfg(name="C1"), ChildCfg(name="C2", value=50)]
-        )
+        cfg = ConfigListCfg(children=[ChildCfg(name="C1"), ChildCfg(name="C2", value=50)])
         self.assertIsInstance(cfg.children[0], ChildCfg)
         self.assertEqual(cfg.children[0].name, "C1")
         self.assertEqual(cfg.children[1].value, 50)
@@ -367,7 +393,8 @@ class TestBlueprintCfg(unittest.TestCase):
             dm.tag_list.append("z")
         self.assertEqual(p.child.value, 1)
         self.assertEqual(p.tag_list, ["x", "y"])
-        self.assertEqual(d.child.value, 1)  # d itself is untouched too -- dm is its own clone
+        # d itself is untouched too -- dm is its own clone
+        self.assertEqual(d.child.value, 1)
         self.assertEqual(d.tag_list, ["x", "y"])
         self.assertEqual(dm.child.value, 99)
         self.assertEqual(dm.tag_list, ["x", "y", "z"])
@@ -570,13 +597,13 @@ class TestMutableCopy(unittest.TestCase):
         class ConfigListCfg(BlueprintCfg):
             children: list[ChildCfg]
 
-        cfg = ConfigListCfg(
-            children=[ChildCfg(name="C1", value=1), ChildCfg(name="C2", value=2)]
-        )
+        cfg = ConfigListCfg(children=[ChildCfg(name="C1", value=1), ChildCfg(name="C2", value=2)])
         with cfg.mutable_copy() as y:
             y.children[0].value = 999  # direct mutation of a list item, cascaded
-            y.children.append(ChildCfg(name="C3", value=3))  # newly appended item too...
-            y.children[2].value = 30  # ...is itself mutable within the same block
+            # newly appended item too...
+            # ...is itself mutable within the same block
+            y.children.append(ChildCfg(name="C3", value=3))
+            y.children[2].value = 30
         self.assertEqual(y.children[0].value, 999)
         self.assertEqual(len(y.children), 3)
         self.assertEqual(y.children[2].name, "C3")
@@ -594,22 +621,23 @@ class TestMutableCopy(unittest.TestCase):
             y.items["a"].value = 42  # direct mutation of a dict value, cascaded
 
             y.items["b"] = ChildCfg(name="B", value=2)
-            # Unlike ConfigList.append(), assigning into a ConfigDict does not currently
-            # cascade mutability onto the value, so a freshly-attached one is locked here.
-            with self.assertRaises(AttributeError):
-                y.items["b"].value = 20
+            # Like ConfigList.append(), assigning into a ConfigDict cascades mutability
+            # onto the value, so a freshly-attached one is directly editable too.
+            y.items["b"].value = 20
 
-            # Assigning a reference to an EXISTING, external instance is locked too -- which
-            # incidentally avoids mutating that external instance through the alias.
+            # Assigning a reference to an EXISTING, external instance is deep-copied on
+            # the way in, so it's independently mutable here without ever touching the
+            # original object it was copied from.
             y.items["c"] = reg.items["a"]
-            with self.assertRaises(AttributeError):
-                y.items["c"].value = 43
+            y.items["c"].value = 43
 
         self.assertEqual(y.items["a"].value, 42)
         self.assertIsInstance(y.items["b"], ChildCfg)
         self.assertEqual(y.items["b"].name, "B")
-        self.assertEqual(y.items["b"].value, 2)
-        # original untouched
+        self.assertEqual(y.items["b"].value, 20)
+        self.assertIsInstance(y.items["c"], ChildCfg)
+        self.assertEqual(y.items["c"].value, 43)
+        # original untouched -- neither by the "a" mutation nor by the "c" alias
         self.assertEqual(reg.items["a"].value, 1)
         self.assertEqual(len(reg.items), 1)
 

@@ -1,19 +1,28 @@
+"""Blueprint: typed, immutable-by-default config objects for Python.
+
+Define config schemas as classes with type-annotated fields (similar to a
+dataclass). Instances are frozen after construction; changes only happen
+inside an explicit ``mutable_copy()`` block, which yields an independent,
+deep, mutable copy and re-validates it (including any custom ``check()``
+logic) when the block exits.
+"""
+
 import contextlib
 import copy
 import enum
 import types
 import typing
 from typing import (
+    Annotated,
     Any,
-    Dict,
     Literal,
     Union,
+    dataclass_transform,
     get_args,
     get_origin,
-    Annotated,
 )
 
-from typing import dataclass_transform
+__all__ = ["BlueprintCfg", "FieldInfo", "MISSING", "field", "format", "check_type"]
 
 
 class MissingType:
@@ -42,9 +51,7 @@ class FieldInfo:
 
 def field(*, default=MISSING, default_factory=MISSING, description=None) -> Any:
     """Helper to define field metadata such as default values, factories, or descriptions."""
-    return FieldInfo(
-        default=default, default_factory=default_factory, description=description
-    )
+    return FieldInfo(default=default, default_factory=default_factory, description=description)
 
 
 def check_type(value: Any, expected_type: Any) -> bool:
@@ -101,10 +108,7 @@ def check_type(value: Any, expected_type: Any) -> bool:
                 return False
             if args:
                 key_type, val_type = args
-                return all(
-                    check_type(k, key_type) and check_type(v, val_type)
-                    for k, v in value.items()
-                )
+                return all(check_type(k, key_type) and check_type(v, val_type) for k, v in value.items())
             return True
 
     # Handle Enum
@@ -139,23 +143,16 @@ class ConfigList(list):
         for item in iterable:
             conv = _convert_value(item, item_type)
             if not check_type(conv, item_type):
-                raise TypeError(
-                    f"Invalid item type: expected {item_type}, "
-                    f"got {type(conv).__name__} ({repr(conv)})"
-                )
+                raise TypeError(f"Invalid item type: expected {item_type}, got {type(conv).__name__} ({repr(conv)})")
             converted.append(conv)
         super().__init__(converted)
 
     def _convert_and_validate(self, item):
+        item = copy.deepcopy(item)
         conv = _convert_value(item, self._item_type)
         if not check_type(conv, self._item_type):
-            raise TypeError(
-                f"Invalid item type: expected {self._item_type}, "
-                f"got {type(conv).__name__} ({repr(conv)})"
-            )
-        # Reached only after __assert_mutable() already passed (see append/extend/insert/
-        # __setitem__ below), so cascade mutability onto any freshly-created nested value too,
-        # for the rest of the current mutable_copy() block.
+            raise TypeError(f"Invalid item type: expected {self._item_type}, got {type(conv).__name__} ({repr(conv)})")
+        self.__assert_mutable()
         for node in _flat_iter_containers(conv):
             _set_mutable(node, True)
         return conv
@@ -199,9 +196,7 @@ class ConfigList(list):
 
     def __assert_mutable(self):
         if not self._is_blueprint_mutable:
-            raise AttributeError(
-                "Cannot modify ConfigList outside of a mutable_copy() block"
-            )
+            raise AttributeError("Cannot modify ConfigList outside of a mutable_copy() block")
 
     def __reduce__(self):
         """Supports copy.deepcopy() and pickle. Without this, both fall back to the default
@@ -230,32 +225,27 @@ class ConfigDict(dict):
         converted = {}
         for k, v in iterable:
             if not check_type(k, key_type):
-                raise TypeError(
-                    f"Invalid key type: expected {key_type}, "
-                    f"got {type(k).__name__} ({repr(k)})"
-                )
+                raise TypeError(f"Invalid key type: expected {key_type}, got {type(k).__name__} ({repr(k)})")
             conv_v = _convert_value(v, value_type)
             if not check_type(conv_v, value_type):
                 raise TypeError(
-                    f"Invalid value type: expected {value_type}, "
-                    f"got {type(conv_v).__name__} ({repr(conv_v)})"
+                    f"Invalid value type: expected {value_type}, got {type(conv_v).__name__} ({repr(conv_v)})"
                 )
             converted[k] = conv_v
         super().__init__(converted)
 
     def _validate_key(self, key):
         if not check_type(key, self._key_type):
-            raise TypeError(
-                f"Invalid key type: expected {self._key_type}, "
-                f"got {type(key).__name__} ({repr(key)})"
-            )
+            raise TypeError(f"Invalid key type: expected {self._key_type}, got {type(key).__name__} ({repr(key)})")
 
     def _convert_and_validate_val(self, value):
+        value = copy.deepcopy(value)
         conv = _convert_value(value, self._value_type)
         if not check_type(conv, self._value_type):
-            raise TypeError(
-                f"Invalid value type: expected {self._value_type}, got {repr(conv)}"
-            )
+            raise TypeError(f"Invalid value type: expected {self._value_type}, got {repr(conv)}")
+        self.__assert_mutable()
+        for node in _flat_iter_containers(conv):
+            _set_mutable(node, True)
         return conv
 
     def __setitem__(self, key, value):
@@ -307,9 +297,7 @@ class ConfigDict(dict):
 
     def __assert_mutable(self):
         if not self._is_blueprint_mutable:
-            raise AttributeError(
-                "Cannot modify ConfigDict outside of a mutable_copy() block"
-            )
+            raise AttributeError("Cannot modify ConfigDict outside of a mutable_copy() block")
 
     def __reduce__(self):
         """Supports copy.deepcopy() and pickle -- see ConfigList.__reduce__ for why this is
@@ -367,6 +355,14 @@ def _convert_value(value, expected_type):
         origin = get_origin(expected_type)
         args = get_args(expected_type)
 
+    # Bare `list`/`dict`/`tuple` (no subscript) are plain classes, not generic aliases --
+    # get_origin() returns None for them, unlike their typing.List/Dict/Tuple counterparts
+    # or a subscripted list[...]/dict[...]/tuple[...]. Treat them the same as their
+    # unconstrained (Any-typed) parameterized form so they still get wrapped in the
+    # validating/immutable proxy instead of silently passing through as plain containers.
+    if expected_type in (list, dict, tuple):
+        origin = expected_type
+
     if origin is list:
         if isinstance(value, list):
             item_type = args[0] if args else Any
@@ -384,10 +380,7 @@ def _convert_value(value, expected_type):
                         f"Invalid number of elements for {expected_type}: "
                         f"expected {len(args)}, got {len(value)} ({repr(value)})"
                     )
-                return tuple(
-                    _convert_value(item, arg)
-                    for item, arg in zip(value, args, strict=True)
-                )
+                return tuple(_convert_value(item, arg) for item, arg in zip(value, args, strict=True))
             return value
 
     if origin is dict:
@@ -402,7 +395,7 @@ def _convert_value(value, expected_type):
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(field,))
 class BlueprintCfg:
-    __blueprint_fields__: Dict[str, FieldInfo] = {}
+    __blueprint_fields__: dict[str, FieldInfo] = {}
     # allows mutations on this instance; mutable_copy() cascades this to the whole
     # nested tree (see _iter_containers/_set_mutable), so children get their own flag too
     _is_blueprint_mutable = False
@@ -425,9 +418,7 @@ class BlueprintCfg:
             _resolved_hints = typing.get_type_hints(cls, include_extras=True)
             # replace with resolved hints if those are available
             annotations = {**_local_annotations, **_resolved_hints}
-        except (
-            NameError
-        ):  # in case forward-references can't be resovled, or "a local class"
+        except NameError:  # in case forward-references can't be resovled, or "a local class"
             annotations = _local_annotations
 
         # Process field metadata and defaults
@@ -521,9 +512,7 @@ class BlueprintCfg:
             # Validate that all arguments passed are recognized fields
             extra = set(kwargs.keys()) - set(fields.keys())
             if extra:
-                raise TypeError(
-                    f"__init__() got unexpected keyword arguments: {', '.join(map(repr, sorted(extra)))}"
-                )
+                raise TypeError(f"__init__() got unexpected keyword arguments: {', '.join(map(repr, sorted(extra)))}")
 
             # Initialize private state
             self.__dict__["_initialized"] = False
@@ -537,10 +526,11 @@ class BlueprintCfg:
                 elif field_info.default_factory is not MISSING:
                     val = field_info.default_factory()
                 else:
-                    raise TypeError(
-                        f"__init__() missing required keyword-only argument: {repr(name)}"
-                    )
+                    raise TypeError(f"__init__() missing required keyword-only argument: {repr(name)}")
 
+                # Deep-copy first so construction can't alias external mutable state
+                # (mirrors __setattr__, which does the same for the same reason).
+                val = copy.deepcopy(val)
                 val = _convert_value(val, field_info.type)
                 self.__dict__[name] = val
 
@@ -573,11 +563,12 @@ class BlueprintCfg:
 
         if not self._is_blueprint_mutable:
             raise AttributeError(
-                f"Cannot assign to field {repr(name)} of {self.__class__.__name__} outside "
-                f"of a mutable_copy() block"
+                f"Cannot assign to field {repr(name)} of {self.__class__.__name__} outside of a mutable_copy() block"
             )
 
         field_info = fields[name]
+        # Deep-copy first so we didn't modify or link some external object
+        value = copy.deepcopy(value)
         value = _convert_value(value, field_info.type)
         # We already know we're mutable here (checked above), so cascade that onto any
         # freshly-created or freshly-attached nested value too, for the rest of this block.
@@ -597,9 +588,7 @@ class BlueprintCfg:
     def __delattr__(self, name):
         fields = getattr(self, "__blueprint_fields__", {})
         if name in fields:
-            raise AttributeError(
-                f"Cannot delete field {repr(name)} of {self.__class__.__name__}"
-            )
+            raise AttributeError(f"Cannot delete field {repr(name)} of {self.__class__.__name__}")
         super().__delattr__(name)
 
     def __repr__(self):
@@ -654,3 +643,61 @@ class BlueprintCfg:
                 _set_mutable(node, False)
                 if isinstance(node, BlueprintCfg):
                     node._validate_self()
+
+
+def _format_leaf(value: Any) -> str:
+    if isinstance(value, enum.Enum):
+        return f"{type(value).__name__}.{value.name}"
+    return repr(value)
+
+
+def _wrap(opening: str, parts: list, closing: str, indent: int, linewidth: int, level: int) -> str:
+    """Renders `opening + ", ".join(parts) + closing` on one line if it fits within
+    `linewidth`; otherwise renders one part per line, indented by `indent` spaces
+    per nesting level."""
+    if not parts:
+        return opening + closing
+    one_line = opening + ", ".join(parts) + closing
+    if len(one_line) <= linewidth and "\n" not in one_line:
+        return one_line
+    pad = " " * (indent * (level + 1))
+    closing_pad = " " * (indent * level)
+    body = ",\n".join(pad + part for part in parts)
+    return f"{opening}\n{body},\n{closing_pad}{closing}"
+
+
+def _format_value(value: Any, indent: int, linewidth: int, level: int) -> str:
+    if isinstance(value, BlueprintCfg):
+        fields = getattr(value, "__blueprint_fields__", {})
+        parts = [
+            f"{name}={_format_value(value.__dict__[name], indent, linewidth, level + 1)}"
+            for name in fields
+            if name in value.__dict__
+        ]
+        return _wrap(f"{type(value).__name__}(", parts, ")", indent, linewidth, level)
+    if isinstance(value, (ConfigList, list)):
+        parts = [_format_value(item, indent, linewidth, level + 1) for item in value]
+        return _wrap("[", parts, "]", indent, linewidth, level)
+    if isinstance(value, tuple):
+        parts = [_format_value(item, indent, linewidth, level + 1) for item in value]
+        if len(parts) == 1:
+            return _wrap("(", parts, ",)", indent, linewidth, level)
+        return _wrap("(", parts, ")", indent, linewidth, level)
+    if isinstance(value, (ConfigDict, dict)):
+        parts = [
+            f"{_format_value(k, indent, linewidth, level + 1)}: {_format_value(v, indent, linewidth, level + 1)}"
+            for k, v in value.items()
+        ]
+        return _wrap("{", parts, "}", indent, linewidth, level)
+    return _format_leaf(value)
+
+
+def format(cfg: BlueprintCfg, indent: int = 2, linewidth: int = 120) -> str:
+    """Pretty-prints a BlueprintCfg (and any nested configs/containers) as a
+    readable, deterministic string -- similar in spirit to `repr()`, but wraps
+    long lines: any container whose single-line rendering would exceed
+    `linewidth` characters is instead rendered with one element per line,
+    indented by `indent` spaces per nesting level."""
+    if not isinstance(cfg, BlueprintCfg):
+        raise TypeError(f"format() expects a BlueprintCfg instance, got {type(cfg)}")
+    return _format_value(cfg, indent, linewidth, 0)
