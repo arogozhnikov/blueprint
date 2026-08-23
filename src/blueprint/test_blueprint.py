@@ -420,6 +420,38 @@ class TestBlueprintCfg(unittest.TestCase):
         self.assertEqual(p2m.tag_list, ["x", "y", "z"])
 
 
+class TestEquality(unittest.TestCase):
+    """Covers: `==` behavior for BlueprintCfg instances across deepcopy() and mutable_copy()."""
+
+    def test_deepcopy_is_equal_to_original(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+        d = copy.deepcopy(p)
+
+        self.assertIsNot(d, p)
+        self.assertEqual(d, p)
+
+    def test_mutable_copy_without_changes_is_equal_to_original(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+        with p.mutable_copy() as y:
+            pass  # no changes made inside the block
+
+        self.assertIsNot(y, p)
+        self.assertEqual(y, p)
+
+    def test_mutable_copy_with_changes_is_not_equal_to_original(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+
+        # A change to a plain field
+        with p.mutable_copy() as y:
+            y.tag_list.append("z")
+        self.assertNotEqual(y, p)
+
+        # A change to a nested BlueprintCfg field
+        with p.mutable_copy() as y2:
+            y2.child.value = 99
+        self.assertNotEqual(y2, p)
+
+
 class TestAssignmentProhibition(unittest.TestCase):
     """Covers: assignment (of any kind) is prohibited outside of a mutable_copy() block."""
 
@@ -723,6 +755,60 @@ class TestMutableCopy(unittest.TestCase):
             self.assertEqual(y.name, "A")
             y.name = "B"
             self.assertEqual(y.name, "B")
+
+
+class TestImmutableByDefault(unittest.TestCase):
+    """Covers: every container type the package ships -- ConfigList, ConfigDict,
+    and BlueprintCfg -- is immutable unless explicitly unlocked via mutable_copy()."""
+
+    def test_class_level_flag_defaults_to_immutable(self):
+        # The flag that gates every mutation defaults to False on the class itself,
+        # so any freshly created instance starts out immutable without extra effort.
+        for cls in (ConfigList, ConfigDict, BlueprintCfg):
+            with self.subTest(cls=cls.__name__):
+                self.assertFalse(cls._is_blueprint_mutable)
+
+    def test_fresh_instances_are_immutable(self):
+        instances = {
+            "ConfigList": ConfigList([1, 2], int),
+            "ConfigDict": ConfigDict({"a": 1}, str, int),
+            "BlueprintCfg": ChildCfg(name="A", value=1),
+        }
+        for label, obj in instances.items():
+            with self.subTest(cls=label):
+                self.assertFalse(obj._is_blueprint_mutable)
+
+    def test_mutation_raises_by_default(self):
+        lst = ConfigList([1, 2], int)
+        with self.assertRaises(AttributeError):
+            lst.append(3)
+        with self.assertRaises(AttributeError):
+            lst[0] = 9
+        with self.assertRaises(AttributeError):
+            del lst[0]
+        self.assertEqual(lst, [1, 2])  # untouched
+
+        dct = ConfigDict({"a": 1}, str, int)
+        with self.assertRaises(AttributeError):
+            dct["b"] = 2
+        with self.assertRaises(AttributeError):
+            del dct["a"]
+        with self.assertRaises(AttributeError):
+            dct.update({"c": 3})
+        self.assertEqual(dct, {"a": 1})  # untouched
+
+        cfg = ChildCfg(name="A", value=1)
+        with self.assertRaises(AttributeError):
+            cfg.value = 2
+        self.assertEqual(cfg.value, 1)  # untouched
+
+    def test_nested_containers_of_a_fresh_cfg_are_also_immutable(self):
+        # Immutability isn't just top-level: list/dict/cfg fields nested inside a
+        # freshly constructed BlueprintCfg all start out locked too.
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+        self.assertFalse(p._is_blueprint_mutable)
+        self.assertFalse(p.child._is_blueprint_mutable)
+        self.assertFalse(p.tag_list._is_blueprint_mutable)
 
 
 if __name__ == "__main__":

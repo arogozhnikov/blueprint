@@ -384,10 +384,11 @@ def _convert_value(value, expected_type):
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(field,))
 class BlueprintCfg:
-    __blueprint_fields__: dict[str, FieldInfo] = {}
+    __blueprint_fields__: dict[str, FieldInfo]
     # allows mutations on this instance; mutable_copy() cascades this to the whole
     # nested tree (see _iter_containers/_set_mutable), so children get their own flag too
-    _is_blueprint_mutable = False
+    _is_blueprint_mutable = False # TODO why switching to True does not crash tests?
+
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -398,6 +399,7 @@ class BlueprintCfg:
         for base in reversed(cls.__mro__):
             if base is object or base is BlueprintCfg:
                 continue
+            # TODO should we check  this 
             if hasattr(base, "__blueprint_fields__"):
                 combined_fields.update(base.__blueprint_fields__)
 
@@ -504,6 +506,7 @@ class BlueprintCfg:
                 raise TypeError(f"__init__() got unexpected keyword arguments: {', '.join(map(repr, sorted(extra)))}")
 
             # Initialize private state
+            # TODO do we need _initialized? at all
             self.__dict__["_initialized"] = False
 
             # Populate fields

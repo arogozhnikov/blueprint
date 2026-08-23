@@ -2,8 +2,8 @@
 
 Define config schemas as classes with type-annotated fields (similar to a
 dataclass). Instances are frozen after construction; changes only happen
-inside an explicit ``mutable_copy()`` block, which yields an independent,
-deep, mutable copy and re-validates it (including any custom ``check()``
+inside an explicit `mutable_copy()` block, which yields an independent,
+deep, mutable copy and re-validates it (including any custom `check()`
 logic) when the block exits.
 """
 
