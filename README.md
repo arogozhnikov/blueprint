@@ -17,7 +17,13 @@ Blueprint focuses on these three:
 
 ## Install
 
-This project isn't published to PyPI yet. Install it from a local checkout:
+This project isn't published to PyPI yet. Install it directly from GitHub:
+
+```bash
+pip install "blueprint @ git+https://github.com/arogozhnikov/blueprint.git"
+```
+
+Or from a local checkout:
 
 ```bash
 pip install -e ".[dev]"
@@ -158,8 +164,10 @@ ServerCfg(host=123, port="oops")
 Output (note there is a line for every exception):
 
 ```
-blueprint._blueprint.InvalidBlueprintError: Invalid type for field 'host' in ServerCfg. Expected <class 'str'>, got int (123)
-Invalid type for field ServerCfg.port. Expected <class 'int'>, got str ('oops')
+blueprint._blueprint.InvalidBlueprintError: InvalidBlueprintError(
+  Invalid type for field ServerCfg.host: Expected <class 'str'>, got int (123)
+  Invalid type for field ServerCfg.port: Expected <class 'int'>, got str ('oops')
+)
 ```
 
 

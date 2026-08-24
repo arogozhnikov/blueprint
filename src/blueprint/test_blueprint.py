@@ -858,8 +858,8 @@ class TestInvalidBlueprintError(unittest.TestCase):
             TwoBadFields(a="not an int", b=123)
 
         self.assertEqual(len(ctx.exception.errors), 2)
-        self.assertIn("'a'", ctx.exception.errors[0])
-        self.assertIn("'b'", ctx.exception.errors[1])
+        self.assertIn("TwoBadFields.a", ctx.exception.errors[0])
+        self.assertIn("TwoBadFields.b", ctx.exception.errors[1])
 
 
 class TestMutableCopyExceptionHandling(unittest.TestCase):

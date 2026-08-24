@@ -18,6 +18,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/arogozhnikov/blueprint"
+Repository = "https://github.com/arogozhnikov/blueprint"
+Issues = "https://github.com/arogozhnikov/blueprint/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
