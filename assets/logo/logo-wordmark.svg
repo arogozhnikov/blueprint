@@ -50,6 +50,15 @@
     <path d="M864,206 l-14,-7 M864,206 l-14,7"/>
   </g>
 
+  <!-- vertical dimension line to the left of "b" -->
+  <g stroke="#ffb454" stroke-width="1.6" fill="none" stroke-linecap="round">
+    <line x1="308" y1="60" x2="308" y2="207"/>
+    <line x1="301" y1="89" x2="315" y2="89"/>
+    <line x1="301" y1="178" x2="315" y2="178"/>
+    <path d="M308,89 l-7,-14 M308,89 l7,-14"/>
+    <path d="M308,178 l-7,14 M308,178 l7,14"/>
+  </g>
+
   <!-- tagline -->
   <text x="600" y="234" text-anchor="middle" font-family="ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace"
         font-size="15" letter-spacing="3" fill="#9fb8d4">TYPED&#160;&#183;&#160;IMMUTABLE-BY-DEFAULT&#160;&#183;&#160;PYTHON CONFIGS</text>
