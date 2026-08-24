@@ -1,3 +1,5 @@
+<img src="./assets/logo/logo-wordmark.svg" width=700 />
+
 # blueprint
 
 Typed, immutable-by-default config objects for Python.

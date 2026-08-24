@@ -27,6 +27,7 @@ Issues = "https://github.com/arogozhnikov/blueprint/issues"
 dev = [
     "pytest>=8",
     "ruff~=0.15.8",
+    "pyrefly~=1.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
