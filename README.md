@@ -103,6 +103,36 @@ print(blueprint.format(svc2))
 ```
 
 
+## Class-level fields (ClassVar)
+
+Class-level variables are defined with ClassVar. They are type-checked once, they can't be modified or reassigned.
+
+
+```python
+from typing import ClassVar
+from blueprint import BlueprintCfg
+
+class ServerCfg(BlueprintCfg):
+    kind: ClassVar[str] = "server"  # shared, not per-instance
+    host: str = "localhost"
+    port: int = 8080
+
+cfg = ServerCfg()
+cfg.kind    # "server" -- readable like any class attribute
+# ServerCfg(kind="other")  # raises TypeError -- not a recognized field
+# ServerCfg.kind = "other" # raises AttributeError -- locked after class creation
+```
+
+Subclasses can (and usually should) modify value:
+
+```python
+class WorkerCfg(ServerCfg):
+    kind: ClassVar[str] = "worker"  # fine: this is WorkerCfg's own class body
+
+WorkerCfg.kind   # "worker"
+ServerCfg.kind   # "server" -- base class untouched
+```
+
 ## Comparison with other common tools
 
 We have a ton of config libs. Why creating one more? 
@@ -174,7 +204,8 @@ blueprint._blueprint.InvalidBlueprintError: InvalidBlueprintError(
 
 
 `check()` failures (like the `port out of range` example above) are raised
-as whatever exception your `check()` method raises -- they aren't wrapped.
+as whatever exception your `check()` method raises -- they aren't wrapped. 
+Checks from parent Blueprint are still applied.
 
 ## Escape hatches
 
