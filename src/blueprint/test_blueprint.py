@@ -4,7 +4,7 @@ import pickle
 import unittest
 import warnings
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, ClassVar, Literal
 
 import blueprint
 from blueprint import BlueprintCfg, ConfigDict, ConfigList, InvalidBlueprintError, field
@@ -860,6 +860,98 @@ class TestInvalidBlueprintError(unittest.TestCase):
         self.assertEqual(len(ctx.exception.errors), 2)
         self.assertIn("TwoBadFields.a", ctx.exception.errors[0])
         self.assertIn("TwoBadFields.b", ctx.exception.errors[1])
+
+
+class TestClassVar(unittest.TestCase):
+    """Covers: `ClassVar`-annotated attributes. Unlike regular fields, they're class-level
+    state -- type-checked once at class-creation time (not per instance) and, once the
+    owning class exists, locked against further reassignment or deletion."""
+
+    def test_excluded_from_fields_and_instance_construction(self):
+        class ServerCfg(BlueprintCfg):
+            kind: ClassVar[str] = "server"
+            host: str = "localhost"
+
+        self.assertNotIn("kind", ServerCfg.__blueprint_fields__)
+        self.assertEqual(ServerCfg.__blueprint_classvars__, {"kind": str})
+
+        cfg = ServerCfg()
+        self.assertEqual(cfg.kind, "server")  # readable, via normal class attribute lookup
+
+        # not a constructor kwarg -- it's not in __blueprint_fields__
+        with self.assertRaises(TypeError):
+            ServerCfg(kind="other")
+
+    def test_bad_type_raises_at_class_creation_time(self):
+        with self.assertRaises(InvalidBlueprintError):
+
+            class BadCfg(BlueprintCfg):
+                kind: ClassVar[str] = 123  # type: ignore
+
+    def test_missing_value_raises_at_class_creation_time(self):
+        with self.assertRaises(InvalidBlueprintError):
+
+            class NoValueCfg(BlueprintCfg):
+                kind: ClassVar[str]
+
+    def test_bare_classvar_accepts_any_value(self):
+        class AnyKindCfg(BlueprintCfg):
+            kind: ClassVar = object()
+
+        self.assertIsInstance(AnyKindCfg.kind, object)
+
+    def test_reassignment_after_class_creation_raises(self):
+        class ServerCfg(BlueprintCfg):
+            kind: ClassVar[str] = "server"
+
+        with self.assertRaises(AttributeError):
+            ServerCfg.kind = "other"
+        self.assertEqual(ServerCfg.kind, "server")
+
+    def test_deletion_after_class_creation_raises(self):
+        class ServerCfg(BlueprintCfg):
+            kind: ClassVar[str] = "server"
+
+        with self.assertRaises(AttributeError):
+            del ServerCfg.kind
+        self.assertEqual(ServerCfg.kind, "server")
+
+    def test_instance_level_assignment_also_raises(self):
+        class ServerCfg(BlueprintCfg):
+            kind: ClassVar[str] = "server"
+            host: str = "localhost"
+
+        cfg = ServerCfg()
+        with self.assertRaises(AttributeError):
+            cfg.kind = "other"
+
+    def test_subclass_can_override_independently_in_its_own_class_body(self):
+        class ServerCfg(BlueprintCfg):
+            kind: ClassVar[str] = "server"
+            host: str = "localhost"
+
+        class WorkerCfg(ServerCfg):
+            kind: ClassVar[str] = "worker"
+
+        self.assertEqual(WorkerCfg.kind, "worker")
+        self.assertEqual(ServerCfg.kind, "server")  # base class untouched
+
+        # each class's own lock is independent
+        with self.assertRaises(AttributeError):
+            WorkerCfg.kind = "other"
+        with self.assertRaises(AttributeError):
+            ServerCfg.kind = "other"
+
+    def test_subclass_inherits_lock_without_redeclaring(self):
+        class ServerCfg(BlueprintCfg):
+            kind: ClassVar[str] = "server"
+
+        class WorkerCfg(ServerCfg):
+            host: str = "localhost"
+
+        self.assertEqual(WorkerCfg.kind, "server")
+        with self.assertRaises(AttributeError):
+            WorkerCfg.kind = "other"
 
 
 class TestMutableCopyExceptionHandling(unittest.TestCase):
