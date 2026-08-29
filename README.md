@@ -31,7 +31,7 @@ Or from a local checkout:
 pip install -e ".[dev]"
 ```
 
-Requires Python 3.12 or newer.
+Requires Python 3.11 or newer.
 
 ## Quick example
 

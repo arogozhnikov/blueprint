@@ -7,7 +7,7 @@ name = "blueprint"
 version = "0.1.0"
 description = "Typed, immutable-by-default config objects for Python."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 authors = [
     { name = "Alex Rogozhnikov"},
 ]
@@ -38,7 +38,7 @@ testpaths = ["src/blueprint"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
