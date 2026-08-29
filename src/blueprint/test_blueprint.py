@@ -954,6 +954,113 @@ class TestClassVar(unittest.TestCase):
             WorkerCfg.kind = "other"
 
 
+class TestCheckMro(unittest.TestCase):
+    """Covers: _validate_self() runs every check() found along the MRO (base class first),
+    not just the most-derived override -- so a subclass overriding check() doesn't silently
+    disable its ancestors' checks."""
+
+    def test_every_level_runs_without_super_call(self):
+        calls = []
+
+        class Base(BlueprintCfg):
+            a: int = 1
+
+            def check(self):
+                calls.append("Base")
+
+        class Mid(Base):
+            b: int = 2
+
+            def check(self):
+                calls.append("Mid")  # deliberately does not call super().check()
+
+        class Leaf(Mid):
+            c: int = 3
+            # no override here at all -- Mid's check() must still run, exactly once
+
+        Leaf()
+        self.assertEqual(calls, ["Base", "Mid"])
+
+    def test_runs_base_first_top_down(self):
+        calls = []
+
+        class Base(BlueprintCfg):
+            def check(self):
+                calls.append("Base")
+
+        class Mid(Base):
+            def check(self):
+                calls.append("Mid")
+
+        class Leaf(Mid):
+            def check(self):
+                calls.append("Leaf")
+
+        Leaf()
+        self.assertEqual(calls, ["Base", "Mid", "Leaf"])
+
+    def test_base_check_failure_blocks_construction_before_subclass_check_runs(self):
+        calls = []
+
+        class Base(BlueprintCfg):
+            a: int = 1
+
+            def check(self):
+                calls.append("Base")
+                if self.a < 0:
+                    raise ValueError("a must be >= 0")
+
+        class Leaf(Base):
+            def check(self):
+                calls.append("Leaf")
+
+        with self.assertRaises(ValueError):
+            Leaf(a=-1)
+        self.assertEqual(calls, ["Base"])  # Leaf's check() never ran
+
+    def test_each_ancestors_check_enforced_independently(self):
+        class Base(BlueprintCfg):
+            a: int = 1
+
+            def check(self):
+                if self.a < 0:
+                    raise ValueError("a must be >= 0")
+
+        class Leaf(Base):
+            b: int = 1
+
+            def check(self):
+                if self.b < 0:
+                    raise ValueError("b must be >= 0")
+
+        Leaf(a=1, b=1)  # both pass
+        with self.assertRaises(ValueError):
+            Leaf(a=-1, b=1)  # Base's check fails
+        with self.assertRaises(ValueError):
+            Leaf(a=1, b=-1)  # Leaf's check fails
+
+    def test_runs_again_on_mutable_copy_exit(self):
+        calls = []
+
+        class Base(BlueprintCfg):
+            a: int = 1
+
+            def check(self):
+                calls.append("Base")
+
+        class Leaf(Base):
+            def check(self):
+                calls.append("Leaf")
+
+        cfg = Leaf()
+        with cfg.mutable_copy():
+            pass
+        # mutable_copy() validates at least once on the way out (deepcopy's reconstruction
+        # also runs it, hence "at least" -- what matters here is the last validation, at
+        # block exit, still runs every level, base first).
+        self.assertEqual(calls[-2:], ["Base", "Leaf"])
+
+
 class TestMutableCopyExceptionHandling(unittest.TestCase):
     """Covers: an unrelated exception raised inside a mutable_copy() block while the
     clone is left in a temporarily-invalid cross-field state."""

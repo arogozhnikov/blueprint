@@ -654,7 +654,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             self._validate_self()
 
     def _validate_self(self):
-        """Non-recursive validation (all fields + self.check())."""
+        """Non-recursive validation (all fields + every check() along the MRO)."""
         errors = []
         for name, field_info in self.__blueprint_fields__.items():
             value = getattr(self, name)
@@ -665,7 +665,12 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                 )
         if errors:
             raise InvalidBlueprintError(tuple(errors))
-        self.check()
+
+        # Run every check() defined along the MRO, base class first.
+        # Breaks usual convention, so users didn't call super().check()
+        for klass in reversed(type(self).__mro__):
+            if "check" in klass.__dict__:
+                klass.__dict__["check"](self)
 
     def check(self):
         """Custom post-validation hook. Subclasses override this to implement cross-field checks."""
