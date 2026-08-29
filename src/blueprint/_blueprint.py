@@ -7,6 +7,7 @@ import warnings
 from typing import (
     Annotated,
     Any,
+    ClassVar,
     Literal,
     Union,
     dataclass_transform,
@@ -456,9 +457,56 @@ def _convert_value(value, expected_type):
     return value
 
 
+def _is_classvar(annotated_type) -> bool:
+    """True for `ClassVar` and `ClassVar[...]` annotations (bare or subscripted)."""
+    return annotated_type is ClassVar or get_origin(annotated_type) is ClassVar
+
+
+def _process_classvar(cls, name: str, annotated_type, combined_classvars: dict[str, Any]):
+    """Type-checks a ClassVar-annotated attribute once, at class-creation time, and records
+    it in `combined_classvars` so `_BlueprintCfgMeta`.
+    """
+    args = get_args(annotated_type)
+    inner_type = args[0] if args else Any
+
+    # Prefer the value set directly on this class; fall back to whatever it inherits.
+    value = cls.__dict__.get(name, MISSING)
+    if value is MISSING:
+        value = getattr(cls, name, MISSING)
+    if value is MISSING:
+        raise InvalidBlueprintError((f"ClassVar field {cls.__name__}.{name} has no value",))
+
+    if not check_type(value, inner_type):
+        raise InvalidBlueprintError(
+            (
+                f"Invalid type for ClassVar field {cls.__name__}.{name}: "
+                f"Expected {inner_type}, got {type(value).__name__} ({repr(value)})",
+            )
+        )
+
+    combined_classvars[name] = inner_type
+
+
+class _BlueprintCfgMeta(type):
+    """Metaclass backing BlueprintCfg. Blocks modification / update of class attributes"""
+
+    def __setattr__(cls, name, value):
+        classvars = getattr(cls, "__blueprint_classvars__", None)
+        if classvars and name in classvars:
+            raise AttributeError(f"Cannot reassign ClassVar field {name!r} of {cls.__name__} after class creation")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name):
+        classvars = getattr(cls, "__blueprint_classvars__", None)
+        if classvars and name in classvars:
+            raise AttributeError(f"Cannot delete ClassVar field {name!r} of {cls.__name__} after class creation")
+        super().__delattr__(name)
+
+
 @dataclass_transform(kw_only_default=True, field_specifiers=(field,))
-class BlueprintCfg:
+class BlueprintCfg(metaclass=_BlueprintCfgMeta):
     __blueprint_fields__: dict[str, FieldInfo]
+    __blueprint_classvars__: dict[str, Any]
     # allows mutations on this instance; mutable_copy() cascades this to the whole
     # nested tree (see _iter_containers/_set_mutable), so children get their own flag too
     _is_blueprint_mutable: bool = False
@@ -467,6 +515,7 @@ class BlueprintCfg:
         super().__init_subclass__(**kwargs)
 
         combined_fields = {}
+        combined_classvars = {}
 
         # Inherit fields from parents in MRO (parents evaluated first so subclasses override them).
         # `cls` itself is excluded: __blueprint_fields__ doesn't exist yet (this loop is part of what builds it)
@@ -476,6 +525,7 @@ class BlueprintCfg:
             # issubclass(), not isinstance(): `base` is itself a class (an MRO entry)
             if issubclass(base, BlueprintCfg):
                 combined_fields.update(base.__blueprint_fields__)
+                combined_classvars.update(base.__blueprint_classvars__)
 
         # Get local type annotations
         _local_annotations = getattr(cls, "__annotations__", {})
@@ -489,6 +539,10 @@ class BlueprintCfg:
         # Process field metadata and defaults
         for name, annotated_type in annotations.items():
             if name.startswith("_"):
+                continue
+
+            if _is_classvar(annotated_type):
+                _process_classvar(cls, name, annotated_type, combined_classvars)
                 continue
 
             default = MISSING
@@ -567,6 +621,7 @@ class BlueprintCfg:
                     combined_fields[name].default_factory = MISSING
 
         cls.__blueprint_fields__ = combined_fields
+        cls.__blueprint_classvars__ = combined_classvars
 
     if not typing.TYPE_CHECKING:
         # type checking sees dataclass transform
