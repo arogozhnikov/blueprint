@@ -4,15 +4,19 @@ import enum
 import types
 import typing
 import warnings
+from collections.abc import Callable, Iterator
 from typing import (
     Annotated,
     Any,
     ClassVar,
     Literal,
+    Self,
+    TypeVar,
     Union,
     dataclass_transform,
     get_args,
     get_origin,
+    overload,
 )
 
 __all__ = [
@@ -98,7 +102,12 @@ def debug_prohibit_mutability():
 
 
 class FieldInfo:
-    def __init__(self, default=MISSING, default_factory=MISSING, description=None):
+    def __init__(
+        self,
+        default: Any = MISSING,
+        default_factory: Callable[[], Any] | MissingType = MISSING,
+        description: str | None = None,
+    ):
         self.default = default
         self.default_factory = default_factory
         self.description = description
@@ -113,7 +122,22 @@ class FieldInfo:
         )
 
 
-def field(*, default=MISSING, default_factory=MISSING, description=None) -> Any:
+_T = TypeVar("_T")
+
+
+# overloads allow default of default_factory, but not both
+@overload
+def field(*, default: _T, description: str | None = None) -> _T: ...
+@overload
+def field(*, default_factory: Callable[[], _T], description: str | None = None) -> _T: ...
+@overload
+def field(*, description: str | None = None) -> Any: ...
+def field(
+    *,
+    default: Any = MISSING,
+    default_factory: Callable[[], Any] | MissingType = MISSING,
+    description: str | None = None,
+) -> Any:
     """Helper to define field metadata such as default values, factories, or descriptions."""
     return FieldInfo(default=default, default_factory=default_factory, description=description)
 
@@ -672,7 +696,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             if "check" in klass.__dict__:
                 klass.__dict__["check"](self)
 
-    def check(self):
+    def check(self) -> None:
         """Custom post-validation hook. Subclasses override this to implement cross-field checks."""
         pass
 
@@ -735,7 +759,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         return (_construct_blueprint_cfg, (type(self), kwargs))
 
     @contextlib.contextmanager
-    def mutable_copy(self):
+    def mutable_copy(self) -> Iterator[Self]:
         """Context manager yielding an independent, deep, mutable copy of this instance.
 
             with x.mutable_copy() as y:
