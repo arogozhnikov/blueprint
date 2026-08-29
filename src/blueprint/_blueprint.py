@@ -1,5 +1,6 @@
 import contextlib
 import copy
+import dataclasses
 import enum
 import types
 import typing
@@ -25,18 +26,18 @@ __all__ = [
     "ConfigList",
     "FieldInfo",
     "InvalidBlueprintError",
-    "MISSING",
     "check_type",
     "dangerously_all_mutable",
     "debug_prohibit_mutability",
     "field",
     "format",
+    "unused",
 ]
 
 
-class MissingType:
+class _Unused:
     def __repr__(self):
-        return "MISSING"
+        return "unused"
 
 
 class InvalidBlueprintError(TypeError):
@@ -57,7 +58,7 @@ class InvalidBlueprintError(TypeError):
         return self.__repr__()
 
 
-MISSING = MissingType()
+unused = _Unused()
 
 
 # Depth counters backing the two global escape hatches below. Plain module-level ints (not
@@ -93,6 +94,7 @@ def debug_prohibit_mutability():
         with blueprint.debug_prohibit_mutability():
             with cfg.mutable_copy() as y:  # raises RuntimeError immediately
                 ...
+    Ignores `dangerously_all_mutable`.
     """
     _BlueprintState._global_prohibit_mutability_depth += 1
     try:
@@ -101,25 +103,66 @@ def debug_prohibit_mutability():
         _BlueprintState._global_prohibit_mutability_depth -= 1
 
 
+@dataclasses.dataclass
 class FieldInfo:
-    def __init__(
-        self,
-        default: Any = MISSING,
-        default_factory: Callable[[], Any] | MissingType = MISSING,
-        description: str | None = None,
-    ):
-        self.default = default
-        self.default_factory = default_factory
-        self.description = description
-        self.type = Any
+    default: Any = unused
+    default_factory: Callable[[], Any] | _Unused = unused
+    lt: Any = unused
+    le: Any = unused
+    gt: Any = unused
+    ge: Any = unused
+    # Resolved later, from the field's type annotation -- not a constructor argument.
+    type: Any = dataclasses.field(default=Any, init=False)
 
     def __repr__(self):
-        return (
+        result = (
             f"FieldInfo(default={repr(self.default)}, "
             f"default_factory={repr(self.default_factory)}, "
-            f"description={repr(self.description)}, "
             f"type={repr(self.type)})"
         )
+        if self.lt is not unused:
+            result += f", x < {self.lt}"
+        if self.le is not unused:
+            result += f", x <= {self.le}"
+        if self.gt is not unused:
+            result += f", x > {self.gt}"
+        if self.ge is not unused:
+            result += f", x >= {self.ge}"
+        return result
+
+    def __post_init__(self):
+        assert self.default is unused or self.default_factory is unused, (
+            "can't specify default value and factory at the same time"
+        )
+
+    def _merge_in_parent_fieldinfo(self, parent: "FieldInfo") -> None:
+        """Fills in any of this FieldInfo's not-set (`unused`) attributes from `parent`, used
+        by `__init_subclass__` when a subclass doesn't override every part of an inherited
+        field. Attributes explicitly set on `self` are left untouched."""
+        if self.default is unused and self.default_factory is unused:
+            self.default = parent.default
+            self.default_factory = parent.default_factory
+        if self.lt is unused:
+            self.lt = parent.lt
+        if self.le is unused:
+            self.le = parent.le
+        if self.gt is unused:
+            self.gt = parent.gt
+        if self.ge is unused:
+            self.ge = parent.ge
+
+    def check_bound_error(self, cls_name: str, field_name: str, value: Any) -> list[str]:
+        """Checks a single already-type-checked value against this field's lt/le/gt/ge bounds."""
+        errors = []
+        if self.lt is not unused and not (value < self.lt):
+            errors.append(f"Invalid {cls_name}.{field_name}: expected x < {self.lt!r}, got {value!r}")
+        if self.le is not unused and not (value <= self.le):
+            errors.append(f"Invalid {cls_name}.{field_name}: expected x <= {self.le!r}, got {value!r}")
+        if self.gt is not unused and not (value > self.gt):
+            errors.append(f"Invalid {cls_name}.{field_name}: expected x > {self.gt!r}, got {value!r}")
+        if self.ge is not unused and not (value >= self.ge):
+            errors.append(f"Invalid {cls_name}.{field_name}: expected x >= {self.ge!r}, got {value!r}")
+        return errors
 
 
 _T = TypeVar("_T")
@@ -127,19 +170,35 @@ _T = TypeVar("_T")
 
 # overloads allow default of default_factory, but not both
 @overload
-def field(*, default: _T, description: str | None = None) -> _T: ...
-@overload
-def field(*, default_factory: Callable[[], _T], description: str | None = None) -> _T: ...
-@overload
-def field(*, description: str | None = None) -> Any: ...
 def field(
     *,
-    default: Any = MISSING,
-    default_factory: Callable[[], Any] | MissingType = MISSING,
-    description: str | None = None,
+    default: _T | _Unused = unused,
+    lt: Any = unused,
+    le: Any = unused,
+    gt: Any = unused,
+    ge: Any = unused,
+) -> _T: ...
+@overload
+def field(
+    *,
+    default_factory: Callable[[], _T],
+    lt: Any = unused,
+    le: Any = unused,
+    gt: Any = unused,
+    ge: Any = unused,
+) -> _T: ...
+def field(
+    *,
+    default: Any = unused,
+    default_factory: Callable[[], Any] | _Unused = unused,
+    lt: Any = unused,
+    le: Any = unused,
+    gt: Any = unused,
+    ge: Any = unused,
 ) -> Any:
-    """Helper to define field metadata such as default values, factories, or descriptions."""
-    return FieldInfo(default=default, default_factory=default_factory, description=description)
+    """Helper to define field metadata."""
+
+    return FieldInfo(default=default, default_factory=default_factory, lt=lt, le=le, gt=gt, ge=ge)
 
 
 def check_type(value: Any, expected_type: Any) -> bool:
@@ -401,8 +460,8 @@ def _flat_iter_containers(value):
     """Post-order walk of container hierarchy"""
     if isinstance(value, BlueprintCfg):
         for name in value.__blueprint_fields__:
-            child = value.__dict__.get(name, MISSING)
-            if child is not MISSING:
+            child = value.__dict__.get(name, unused)
+            if child is not unused:
                 yield from _flat_iter_containers(child)
         yield value
     elif isinstance(value, ConfigList):
@@ -494,10 +553,10 @@ def _process_classvar(cls, name: str, annotated_type, combined_classvars: dict[s
     inner_type = args[0] if args else Any
 
     # Prefer the value set directly on this class; fall back to whatever it inherits.
-    value = cls.__dict__.get(name, MISSING)
-    if value is MISSING:
-        value = getattr(cls, name, MISSING)
-    if value is MISSING:
+    value = cls.__dict__.get(name, unused)
+    if value is unused:
+        value = getattr(cls, name, unused)
+    if value is unused:
         raise InvalidBlueprintError((f"ClassVar field {cls.__name__}.{name} has no value",))
 
     if not check_type(value, inner_type):
@@ -569,58 +628,38 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                 _process_classvar(cls, name, annotated_type, combined_classvars)
                 continue
 
-            default = MISSING
-            default_factory = MISSING
-            description = None
-
             actual_type = annotated_type
             if get_origin(annotated_type) is Annotated:
                 args = get_args(annotated_type)
                 actual_type = args[0]
                 for meta in args[1:]:
-                    if isinstance(meta, str):
-                        description = meta
-                    elif isinstance(meta, FieldInfo):
-                        if meta.description:
-                            description = meta.description
-                        if meta.default is not MISSING:
-                            default = meta.default
-                        if meta.default_factory is not MISSING:
-                            default_factory = meta.default_factory
-
-            if hasattr(cls, name) and name in cls.__dict__:
+                    if isinstance(meta, FieldInfo):
+                        new_field_info = meta
+                        break
+                else:
+                    new_field_info = FieldInfo()
+            elif hasattr(cls, name) and name in cls.__dict__:
                 val = cls.__dict__[name]
                 if isinstance(val, FieldInfo):
-                    if val.default is not MISSING:
-                        default = val.default
-                    if val.default_factory is not MISSING:
-                        default_factory = val.default_factory
-                    if val.description:
-                        description = val.description
+                    new_field_info = val
                 else:
-                    default = val
+                    new_field_info = FieldInfo(default=val)
+            else:
+                # just type annotation
+                new_field_info = FieldInfo()
 
             # If field already existed, merge inherited values
             if name in combined_fields:
-                parent_field = combined_fields[name]
-                if default is MISSING and default_factory is MISSING:
-                    default = parent_field.default
-                    default_factory = parent_field.default_factory
-                if not description:
-                    description = parent_field.description
+                new_field_info._merge_in_parent_fieldinfo(combined_fields[name])
 
-            combined_fields[name] = FieldInfo(
-                default=default,
-                default_factory=default_factory,
-                description=description,
-            )
+            combined_fields[name] = new_field_info
             combined_fields[name].type = actual_type
 
             # Clean up the FieldInfo from class level
             if name in cls.__dict__:
                 val = cls.__dict__[name]
                 if isinstance(val, FieldInfo):
-                    if val.default is not MISSING:
+                    if val.default is not unused:
                         setattr(cls, name, val.default)
                     else:
                         delattr(cls, name)
@@ -630,19 +669,25 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             if name in cls.__dict__ and name not in annotations:
                 val = cls.__dict__[name]
                 if isinstance(val, FieldInfo):
-                    if val.default is not MISSING:
+                    if val.default is not unused:
                         combined_fields[name].default = val.default
-                    if val.default_factory is not MISSING:
+                    if val.default_factory is not unused:
                         combined_fields[name].default_factory = val.default_factory
-                    if val.description:
-                        combined_fields[name].description = val.description
-                    if val.default is not MISSING:
+                    if val.lt is not unused:
+                        combined_fields[name].lt = val.lt
+                    if val.le is not unused:
+                        combined_fields[name].le = val.le
+                    if val.gt is not unused:
+                        combined_fields[name].gt = val.gt
+                    if val.ge is not unused:
+                        combined_fields[name].ge = val.ge
+                    if val.default is not unused:
                         setattr(cls, name, val.default)
                     else:
                         delattr(cls, name)
                 else:
                     combined_fields[name].default = val
-                    combined_fields[name].default_factory = MISSING
+                    combined_fields[name].default_factory = unused
 
         cls.__blueprint_fields__ = combined_fields
         cls.__blueprint_classvars__ = combined_classvars
@@ -662,9 +707,9 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             for name, field_info in fields.items():
                 if name in kwargs:
                     val = kwargs[name]
-                elif field_info.default is not MISSING:
+                elif field_info.default is not unused:
                     val = field_info.default
-                elif field_info.default_factory is not MISSING:
+                elif field_info.default_factory is not unused:
                     val = field_info.default_factory()
                 else:
                     raise TypeError(f"__init__() missing required keyword-only argument: {repr(name)}")
@@ -687,6 +732,8 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                     f"Invalid type for field {self.__class__.__name__}.{name}: "
                     f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})"
                 )
+                continue
+            errors.extend(field_info.check_bound_error(self.__class__.__name__, name, value))
         if errors:
             raise InvalidBlueprintError(tuple(errors))
 
@@ -725,10 +772,13 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         if not check_type(value, field_info.type):
             raise InvalidBlueprintError(
                 errors=(
-                    f"Invalid type for field {self.__class__.__name__}{name}: "
+                    f"Invalid type for field {self.__class__.__name__}.{name}: "
                     f"Expected {field_info.type}, got {type(value).__name__} ({repr(value)})",
                 )
             )
+        bound_errors = field_info.check_bound_error(self.__class__.__name__, name, value)
+        if bound_errors:
+            raise InvalidBlueprintError(errors=tuple(bound_errors))
 
         super().__setattr__(name, value)
         # we don't validate full instance here, only field.

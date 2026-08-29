@@ -12,7 +12,6 @@ logic) when the block exits.
 """
 
 from ._blueprint import (
-    MISSING,
     BlueprintCfg,
     ConfigDict,
     ConfigList,
@@ -23,6 +22,7 @@ from ._blueprint import (
     debug_prohibit_mutability,
     field,
     format,
+    unused,
 )
 
 __all__ = [
@@ -31,7 +31,7 @@ __all__ = [
     "ConfigList",
     "FieldInfo",
     "InvalidBlueprintError",
-    "MISSING",
+    "unused",
     "check_type",
     "dangerously_all_mutable",
     "debug_prohibit_mutability",

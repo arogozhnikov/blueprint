@@ -395,14 +395,56 @@ class TestBlueprintCfg(unittest.TestCase):
         self.assertEqual(cfg.name, "Ada")
         self.assertEqual(cfg.greet(), "Hello, Ada!")
 
-    def test_metadata_and_hover_descriptions(self):
-        class AnnotatedMetaCfg(BlueprintCfg):
-            port: Annotated[int, "The port number"] = 8080
-            host: str = field(default="localhost", description="The host address")
+    def test_numeric_bounds_via_field(self):
+        class BoundedCfg(BlueprintCfg):
+            port: int = field(default=8080, gt=0, lt=65536)
+            ratio: float = field(default=0.5, ge=0.0, le=1.0)
 
-        fields = AnnotatedMetaCfg.__blueprint_fields__
-        self.assertEqual(fields["port"].description, "The port number")
-        self.assertEqual(fields["host"].description, "The host address")
+        # Valid values construct fine
+        cfg = BoundedCfg(port=8000, ratio=1.0)
+        self.assertEqual(cfg.port, 8000)
+
+        # Out-of-bounds values are rejected at construction time
+        with self.assertRaises(InvalidBlueprintError):
+            BoundedCfg(port=0)
+        with self.assertRaises(InvalidBlueprintError):
+            BoundedCfg(port=70000)
+        with self.assertRaises(InvalidBlueprintError):
+            BoundedCfg(ratio=1.1)
+
+        # ...and at assignment time too, inside a mutable_copy() block
+        with cfg.mutable_copy() as m:
+            with self.assertRaises(InvalidBlueprintError):
+                m.port = -1
+            m.port = 443  # still valid
+
+    def test_numeric_bounds_via_annotated(self):
+        class BoundedCfg(BlueprintCfg):
+            count: Annotated[int, field(ge=0)] = 0
+
+        cfg = BoundedCfg(count=0)
+        self.assertEqual(cfg.count, 0)
+        with self.assertRaises(InvalidBlueprintError):
+            BoundedCfg(count=-1)
+
+    def test_numeric_bounds_are_inherited(self):
+        class BaseCfg(BlueprintCfg):
+            level: int = field(default=1, ge=1, le=10)
+
+        class SubCfg(BaseCfg):
+            pass
+
+        with self.assertRaises(InvalidBlueprintError):
+            SubCfg(level=11)
+        self.assertEqual(SubCfg(level=5).level, 5)
+
+    def test_field_info_repr_includes_bounds(self):
+        info = field(default=1, lt=10, le=9, gt=0, ge=1)
+        text = repr(info)
+        self.assertIn("x < 10", text)
+        self.assertIn("x <= 9", text)
+        self.assertIn("x > 0", text)
+        self.assertIn("x >= 1", text)
 
     def test_deepcopy_produces_independent_copy(self):
         p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
