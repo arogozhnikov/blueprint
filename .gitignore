@@ -18,3 +18,5 @@ uv.lock
 # macOS
 .DS_Store
 
+# LLMs artifacts:
+_to_delete/

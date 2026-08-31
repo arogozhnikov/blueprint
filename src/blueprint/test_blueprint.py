@@ -1,3 +1,8 @@
+# This file deliberately constructs invalid configs to exercise runtime validation
+# (InvalidBlueprintError) -- pytest covers its correctness, not a static type checker.
+# mypy: ignore-errors
+# pyrefly: ignore-errors
+
 import copy
 import enum
 import pickle

@@ -5,6 +5,7 @@ import enum
 import types
 import typing
 import warnings
+from abc import ABCMeta
 from collections.abc import Callable, Iterator
 from typing import (
     Annotated,
@@ -570,7 +571,7 @@ def _process_classvar(cls, name: str, annotated_type, combined_classvars: dict[s
     combined_classvars[name] = inner_type
 
 
-class _BlueprintCfgMeta(type):
+class _BlueprintCfgMeta(ABCMeta):
     """Metaclass backing BlueprintCfg. Blocks modification / update of class attributes"""
 
     def __setattr__(cls, name, value):

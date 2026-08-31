@@ -92,7 +92,7 @@ print("""
 
 
 try:
-    ServerCfg(host=123, port="oops")
+    ServerCfg(host=123, port="oops")  # type: ignore
     raise AssertionError("should not get here")
 except InvalidBlueprintError as e:
     print(f"caught InvalidBlueprintError: {e}")
