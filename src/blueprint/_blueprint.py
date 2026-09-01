@@ -21,20 +21,6 @@ from typing import (
     overload,
 )
 
-__all__ = [
-    "BlueprintCfg",
-    "ConfigDict",
-    "ConfigList",
-    "FieldInfo",
-    "InvalidBlueprintError",
-    "check_type",
-    "dangerously_all_mutable",
-    "debug_prohibit_mutability",
-    "field",
-    "format",
-    "unused",
-]
-
 
 class _Unused:
     def __repr__(self):
@@ -112,6 +98,7 @@ class FieldInfo:
     le: Any = unused
     gt: Any = unused
     ge: Any = unused
+    unchecked: bool = False  # we have unchecked_field
     # Resolved later, from the field's type annotation -- not a constructor argument.
     type: Any = dataclasses.field(default=Any, init=False)
 
@@ -129,6 +116,8 @@ class FieldInfo:
             result += f", x > {self.gt}"
         if self.ge is not unused:
             result += f", x >= {self.ge}"
+        if self.unchecked:
+            result += ", unchecked=True"
         return result
 
     def __post_init__(self):
@@ -151,6 +140,7 @@ class FieldInfo:
             self.gt = parent.gt
         if self.ge is unused:
             self.ge = parent.ge
+        # do not use parent's unchecked
 
     def check_bound_error(self, cls_name: str, field_name: str, value: Any) -> list[str]:
         """Checks a single already-type-checked value against this field's lt/le/gt/ge bounds."""
@@ -200,6 +190,26 @@ def field(
     """Helper to define field metadata."""
 
     return FieldInfo(default=default, default_factory=default_factory, lt=lt, le=le, gt=gt, ge=ge)
+
+
+# overloads allow default or default_factory, but not both
+@overload
+def unchecked_field(*, default: _T | _Unused = unused) -> _T: ...
+@overload
+def unchecked_field(*, default_factory: Callable[[], _T]) -> _T: ...
+def unchecked_field(
+    *,
+    default: Any = unused,
+    default_factory: Callable[[], Any] | _Unused = unused,
+) -> Any:
+    """Bypass normal checks, use as a last resort.
+    Only type is checked, immutability isn't.
+
+        class TrainCfg(BlueprintCfg):
+            model: torch.nn.Module = unchecked_field()
+    """
+
+    return FieldInfo(default=default, default_factory=default_factory, unchecked=True)
 
 
 def check_type(value: Any, expected_type: Any) -> bool:
@@ -587,7 +597,7 @@ class _BlueprintCfgMeta(ABCMeta):
         super().__delattr__(name)
 
 
-@dataclass_transform(kw_only_default=True, field_specifiers=(field,))
+@dataclass_transform(kw_only_default=True, field_specifiers=(field, unchecked_field))
 class BlueprintCfg(metaclass=_BlueprintCfgMeta):
     __blueprint_fields__: dict[str, FieldInfo]
     __blueprint_classvars__: dict[str, Any]
