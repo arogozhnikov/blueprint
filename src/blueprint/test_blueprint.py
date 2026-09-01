@@ -495,6 +495,75 @@ class TestBlueprintCfg(unittest.TestCase):
         self.assertEqual(p2m.tag_list, ["x", "y", "z"])
 
 
+class TestAsDict(unittest.TestCase):
+    """Covers: `as_dict()` and `as_dict_selected_fields()`."""
+
+    def test_as_dict_basic(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+        d = p.as_dict()
+        self.assertEqual(d, {"child": {"name": "A", "value": 1}, "tag_list": ["x", "y"]})
+        self.assertIs(type(d), dict)
+        self.assertIs(type(d["child"]), dict)
+        self.assertIs(type(d["tag_list"]), list)
+
+    def test_as_dict_nested_containers(self):
+        class Nested(BlueprintCfg):
+            color: Color = Color.RED
+            point: tuple[int, int] = (1, 2)
+            mapping: dict[str, int] = field(default_factory=dict)
+            children: list[ChildCfg] = field(default_factory=list)
+
+        n = Nested(mapping={"a": 1}, children=[ChildCfg(name="c1")])
+        d = n.as_dict()
+        self.assertEqual(
+            d,
+            {
+                "color": Color.RED,
+                "point": (1, 2),
+                "mapping": {"a": 1},
+                "children": [{"name": "c1", "value": 10}],
+            },
+        )
+        self.assertIs(type(d["point"]), tuple)
+        self.assertIs(type(d["mapping"]), dict)
+        self.assertIs(type(d["children"]), list)
+        self.assertIs(type(d["children"][0]), dict)
+
+    def test_as_dict_does_not_alias_internal_containers(self):
+        # Mutating the returned dict/list must not affect the original config.
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+        d = p.as_dict()
+        d["tag_list"].append("z")
+        d["child"]["value"] = 999
+        self.assertEqual(p.tag_list, ["x", "y"])
+        self.assertEqual(p.child.value, 1)
+
+    def test_as_dict_selected_fields(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
+        self.assertEqual(
+            p.as_dict_selected_fields("child"),
+            {"child": {"name": "A", "value": 1}},
+        )
+        # comma- and/or whitespace-separated
+        self.assertEqual(
+            p.as_dict_selected_fields("child, tag_list"),
+            {"child": {"name": "A", "value": 1}, "tag_list": ["x", "y"]},
+        )
+        self.assertEqual(
+            p.as_dict_selected_fields(" child   tag_list "),
+            {"child": {"name": "A", "value": 1}, "tag_list": ["x", "y"]},
+        )
+
+    def test_as_dict_selected_fields_rejects_unknown_names(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1))
+        with self.assertRaises(TypeError):
+            p.as_dict_selected_fields("child, nope")
+
+    def test_as_dict_selected_fields_empty_string(self):
+        p = ParentCfg(child=ChildCfg(name="A", value=1))
+        self.assertEqual(p.as_dict_selected_fields(""), {})
+
+
 class TestEquality(unittest.TestCase):
     """Covers: `==` behavior for BlueprintCfg instances across deepcopy() and mutable_copy()."""
 

@@ -6,7 +6,7 @@ import types
 import typing
 import warnings
 from abc import ABCMeta
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import (
     Annotated,
     Any,
@@ -796,6 +796,17 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             field_strs.append(f"{name}={repr(val)}")
         return f"{self.__class__.__name__}({', '.join(field_strs)})"
 
+    def as_dict(self) -> dict[str, Any]:
+        """Recursively converts this config into plain `dict` / `list` / `tuple` containers."""
+        return {name: _as_dict_value(getattr(self, name)) for name in self.__blueprint_fields__}
+
+    def as_dict_selected_fields(self, selected: list[str]) -> dict[str, Any]:
+        """Like `as_dict()`, but includes only the given fields."""
+        unknown = [name for name in selected if name not in self.__blueprint_fields__]
+        if unknown:
+            raise TypeError(f"as_dict_selected_fields() got unexpected field names: {', '.join(map(repr, unknown))}")
+        return {name: _as_dict_value(getattr(self, name)) for name in selected}
+
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
@@ -810,7 +821,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         return (_construct_blueprint_cfg, (type(self), kwargs))
 
     @contextlib.contextmanager
-    def mutable_copy(self) -> Iterator[Self]:
+    def mutable_copy(self) -> Generator[Self]:
         """Context manager yielding an independent, deep, mutable copy of this instance.
 
             with x.mutable_copy() as y:
@@ -867,6 +878,19 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                         stacklevel=2,
                     )
                     # just keep propagating previous exception
+
+
+def _as_dict_value(value: Any) -> Any:
+    """Recursive helper backing `BlueprintCfg.as_dict()` / `as_dict_selected_fields()`."""
+    if isinstance(value, BlueprintCfg):
+        return value.as_dict()
+    if isinstance(value, (ConfigList, list)):
+        return [_as_dict_value(item) for item in value]
+    if isinstance(value, (ConfigDict, dict)):
+        return {key: _as_dict_value(val) for key, val in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_as_dict_value(item) for item in value)
+    return value
 
 
 def _format_leaf(value: Any) -> str:
