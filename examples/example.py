@@ -148,4 +148,43 @@ with cfg.mutable_copy() as cfg4:
 assert cfg4.port == 7000
 
 
+print("""
+# ---------------------------------------------------------------------------------
+# 7. unchecked_field() -- a last-resort escape hatch for other classes.
+# ---------------------------------------------------------------------------------
+""")
+
+
+class Handle:
+    """Arbitrary python class"""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def __repr__(self) -> str:
+        return f"Handle({self.label!r})"
+
+
+class JobCfg(BlueprintCfg):
+    name: str
+    handle: Handle = blueprint.unchecked_field(default_factory=lambda: Handle("none"))
+
+
+job = JobCfg(name="train", handle=Handle("gpu-0"))
+print(f"job.handle: {job.handle}")
+
+# classes outside of blueprint are not immutable
+job.handle.label = "gpu-1"
+# and not necessarily check the type or consistency.
+job.handle.label = None  # type: ignore
+
+try:
+    with job.mutable_copy() as job2:
+        job2.handle = "will fail - type is still checked"  # type: ignore
+except InvalidBlueprintError:
+    pass
+
+
+print(job.as_dict())
+
 print("\nAll example sections completed successfully.")

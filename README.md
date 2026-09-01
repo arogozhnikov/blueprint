@@ -228,6 +228,16 @@ with blueprint.debug_prohibit_mutability():
         ...
 ```
 
+One can store arbitraty fields in blueprint with `unchecked_field`, however this is a bad idea in general, and discouraged. You also lose any mutability guarantees.
+
+```python
+from blueprint import BlueprintCfg, unchecked_field
+
+class TrainCfg(BlueprintCfg):
+    name: str
+    model: torch.nn.Module = unchecked_field()
+```
+
 ## Example
 
 `examples/example.py` is a runnable, commented tour of everything above (and is covered by

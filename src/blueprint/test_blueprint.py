@@ -541,27 +541,27 @@ class TestAsDict(unittest.TestCase):
     def test_as_dict_selected_fields(self):
         p = ParentCfg(child=ChildCfg(name="A", value=1), tag_list=["x", "y"])
         self.assertEqual(
-            p.as_dict_selected_fields("child"),
+            p.as_dict_selected_fields(["child"]),
             {"child": {"name": "A", "value": 1}},
         )
         # comma- and/or whitespace-separated
         self.assertEqual(
-            p.as_dict_selected_fields("child, tag_list"),
+            p.as_dict_selected_fields(["child", "tag_list"]),
             {"child": {"name": "A", "value": 1}, "tag_list": ["x", "y"]},
         )
         self.assertEqual(
-            p.as_dict_selected_fields(" child   tag_list "),
+            p.as_dict_selected_fields(["child", "tag_list"]),
             {"child": {"name": "A", "value": 1}, "tag_list": ["x", "y"]},
         )
 
     def test_as_dict_selected_fields_rejects_unknown_names(self):
         p = ParentCfg(child=ChildCfg(name="A", value=1))
         with self.assertRaises(TypeError):
-            p.as_dict_selected_fields("child, nope")
+            p.as_dict_selected_fields(["child", "nope"])
 
     def test_as_dict_selected_fields_empty_string(self):
         p = ParentCfg(child=ChildCfg(name="A", value=1))
-        self.assertEqual(p.as_dict_selected_fields(""), {})
+        self.assertEqual(p.as_dict_selected_fields([]), {})
 
 
 class TestEquality(unittest.TestCase):
@@ -1068,6 +1068,66 @@ class TestClassVar(unittest.TestCase):
         self.assertEqual(WorkerCfg.kind, "server")
         with self.assertRaises(AttributeError):
             WorkerCfg.kind = "other"
+
+
+class TestUncheckedField(unittest.TestCase):
+    """Covers: `unchecked_field()`, the per-field escape hatch that skips check_type()
+    entirely for one field."""
+
+    def test_accepts_values_field_would_reject(self):
+        class Handle:
+            def __init__(self, label):
+                self.label = label
+
+            def __repr__(self):
+                return f"Handle({self.label})"
+
+        class JobCfg(BlueprintCfg):
+            name: str
+            handle: Handle = blueprint.unchecked_field(default_factory=lambda: Handle("none"))
+
+        # happy path
+        cfg = JobCfg(name="name", handle=Handle("handle"))
+
+        with self.assertRaises(InvalidBlueprintError):
+            # error in unchecked field
+            cfg = JobCfg(name="name", handle="not a handle")
+
+        with self.assertRaises(InvalidBlueprintError):
+            # error in checked field
+            cfg = JobCfg(name=123, handle=Handle("handle"))
+
+        with self.assertRaises(AttributeError):
+            cfg.handle = object()  # still raise on plain assignment
+
+        cfg.handle.label = "object itself is not checked"
+
+        with cfg.mutable_copy() as m:
+            m.handle = Handle(label="still can reassign")
+            m.name = "updated_name"
+
+        self.assertEqual(m.handle.label, "still can reassign")
+        self.assertEqual(m.name, "updated_name")
+
+        with cfg.mutable_copy() as m:
+            with self.assertRaises(InvalidBlueprintError):
+                m.handle = None
+
+        # test serialization doesn't fail
+        assert m.handle.label in str(m.as_dict())
+
+    def test_default_and_default_factory_still_work(self):
+        class Cfg(BlueprintCfg):
+            a: object = blueprint.unchecked_field(default=1)
+            b: object = blueprint.unchecked_field(default_factory=list)
+
+        cfg = Cfg()
+        self.assertEqual(cfg.a, 1)
+        self.assertEqual(cfg.b, [])
+
+    def test_repr_marks_unchecked(self):
+        self.assertIn("unchecked=True", repr(blueprint.unchecked_field(default=1)))
+        self.assertNotIn("unchecked=True", repr(field(default=1)))
 
 
 class TestCheckMro(unittest.TestCase):
