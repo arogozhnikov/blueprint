@@ -144,6 +144,8 @@ class FieldInfo:
 
     def check_bound_error(self, cls_name: str, field_name: str, value: Any) -> list[str]:
         """Checks a single already-type-checked value against this field's lt/le/gt/ge bounds."""
+        if value is None:  # do not check Nones
+            return []
         errors = []
         if self.lt is not unused and not (value < self.lt):
             errors.append(f"Invalid {cls_name}.{field_name}: expected x < {self.lt!r}, got {value!r}")
@@ -556,13 +558,6 @@ def _flat_iter_containers(value):
     # list/dict can't appear here, and are expected to be converted before calling this func
 
 
-def _construct_blueprint_cfg(cls, kwargs):
-    """Reconstruction helper for BlueprintCfg.__reduce__. pickle/copy.deepcopy's reduce
-    protocol always calls the reconstruction callable with positional args, but BlueprintCfg
-    subclasses only accept keyword arguments"""
-    return cls(**kwargs)
-
-
 def _convert_value(value, expected_type):
     """Recursively converts lists/tuples/dicts into their internal ConfigList/ConfigDict/tuple
     representation. A field typed as a BlueprintCfg subclass is passed through unchanged -- it
@@ -839,6 +834,14 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
 
             self._validate_self()
 
+    @staticmethod
+    def __construct__(cls, _dict):
+        """Used during unpickle and similar. Enforces check."""
+        result = cls.__new__(cls)
+        result.__dict__.update(_dict)
+        result._validate_self()  # does not check types though!
+        return result
+
     def _validate_self(self):
         """Non-recursive validation (all fields + every check() along the MRO)."""
         errors = []
@@ -930,11 +933,8 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         return all(getattr(self, name) == getattr(other, name) for name in fields)
 
     def __reduce__(self):
-        """Supports copy.deepcopy() and pickle. Without this, the default object protocol
-        reconstructs via cls.__new__(cls) (skipping __init__ and validation)"""
-        fields = self.__blueprint_fields__
-        kwargs = {name: self.__dict__[name] for name in fields if name in self.__dict__}
-        return (_construct_blueprint_cfg, (type(self), kwargs))
+        """Supports copy.deepcopy() and pickle. We enforce check after the instance is reconstructed"""
+        return (BlueprintCfg.__construct__, (type(self), self.__dict__))
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source_type: Any, handler):
