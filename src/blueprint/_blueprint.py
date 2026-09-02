@@ -830,6 +830,48 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         kwargs = {name: self.__dict__[name] for name in fields if name in self.__dict__}
         return (_construct_blueprint_cfg, (type(self), kwargs))
 
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler):
+        """Lets a BlueprintCfg subclass be used as a field type in a pydantic BaseModel/dataclass:
+
+            class Settings(pydantic.BaseModel):
+                server: ServerCfg
+
+        Note: you can serialize this model, can't deserialize - because Blueprint is not deserializable.
+
+        - model_dump_json() / model_dump(mode="json") serialize it back via `as_dict()`;
+        - model_dump(mode="python") (the default) keeps the instance as-is.
+        """
+        from pydantic import GetCoreSchemaHandler  # type: ignore
+        from pydantic_core import core_schema
+
+        handler = typing.cast(GetCoreSchemaHandler, handler)
+
+        def _validate(value: Any) -> "BlueprintCfg":
+            if isinstance(value, cls):
+                return value
+            # ValueError (not TypeError): pydantic only converts ValueError/AssertionError
+            # raised by a validator function into its own ValidationError.
+            raise ValueError(
+                f"Expected an instance of {cls.__name__}, got {type(value).__name__}. "
+                f"blueprint configs have no dict/JSON deserialization -- construct a "
+                f"{cls.__name__}(...) instance and pass that in."
+            )
+
+        return core_schema.no_info_plain_validator_function(
+            _validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda instance: instance.as_dict(),
+                info_arg=False,
+                when_used="json",
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, schema, handler) -> dict[str, Any]:
+        """Backs `model_json_schema()`, this documents the *output* shape, matching `as_dict()`."""
+        return {"type": "object", "title": cls.__name__}
+
     @contextlib.contextmanager
     def mutable_copy(self) -> Generator[Self]:
         """Context manager yielding an independent, deep, mutable copy of this instance.

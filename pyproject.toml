@@ -29,10 +29,23 @@ dev = [
     "ruff~=0.15.8",
     "pyrefly~=1.2.0",
     "mypy~=2.3.1",
+    "pydantic>=2",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blueprint"]
+
+[tool.hatch.envs.default]
+features = ["dev"]
+
+[tool.hatch.envs.default.scripts]
+check = [
+    "ruff check .",
+    "ruff format --check .",
+    "mypy .",
+    "pyrefly check",
+    "pytest",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["src/blueprint"]
