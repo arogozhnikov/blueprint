@@ -556,9 +556,17 @@ def _is_classvar(annotated_type) -> bool:
     return annotated_type is ClassVar or get_origin(annotated_type) is ClassVar
 
 
-def _process_classvar(cls, name: str, annotated_type, combined_classvars: dict[str, Any]):
+def _process_classvar(
+    cls,
+    name: str,
+    annotated_type,
+    combined_classvars: dict[str, Any],
+    missing_classvars: dict[str, Any],
+):
     """Type-checks a ClassVar-annotated attribute once, at class-creation time, and records
-    it in `combined_classvars` so `_BlueprintCfgMeta`.
+    it in `combined_classvars` so `_BlueprintCfgMeta` can lock it against reassignment/deletion.
+
+    A ClassVar with no value anywhere in the MRO isn't an error, but we make class "abstract".
     """
     args = get_args(annotated_type)
     inner_type = args[0] if args else Any
@@ -567,8 +575,9 @@ def _process_classvar(cls, name: str, annotated_type, combined_classvars: dict[s
     value = cls.__dict__.get(name, unused)
     if value is unused:
         value = getattr(cls, name, unused)
-    if value is unused:
-        raise InvalidBlueprintError((f"ClassVar field {cls.__name__}.{name} has no value",))
+    if value is unused:  # nothing inherited either
+        missing_classvars[name] = inner_type
+        return
 
     if not check_type(value, inner_type):
         raise InvalidBlueprintError(
@@ -582,7 +591,18 @@ def _process_classvar(cls, name: str, annotated_type, combined_classvars: dict[s
 
 
 class _BlueprintCfgMeta(ABCMeta):
-    """Metaclass backing BlueprintCfg. Blocks modification / update of class attributes"""
+    """Metaclass backing BlueprintCfg. Blocks modification / update of class attributes, and
+    can mark a class abstract -- uninstantiable, via the same `__abstractmethods__` mechanism."""
+
+    def __new__(mcls, name, bases, namespace, **kwargs):
+        cls = super().__new__(mcls, name, bases, namespace, **kwargs)
+
+        no_defaults = getattr(cls, "__blueprint_classvars_without_values__", ())
+        if no_defaults: 
+            # no default for classvar -> make class abstract (can't create instances)
+            # actual job is done by ABCMeta in this case.
+            cls.__abstractmethods__ = frozenset(cls.__abstractmethods__) | frozenset(no_defaults)
+        return cls
 
     def __setattr__(cls, name, value):
         classvars = getattr(cls, "__blueprint_classvars__", None)
@@ -601,6 +621,7 @@ class _BlueprintCfgMeta(ABCMeta):
 class BlueprintCfg(metaclass=_BlueprintCfgMeta):
     __blueprint_fields__: dict[str, FieldInfo]
     __blueprint_classvars__: dict[str, Any]
+    __blueprint_classvars_without_values__: tuple[str, ...]
     # allows mutations on this instance; mutable_copy() cascades this to the whole
     # nested tree (see _iter_containers/_set_mutable), so children get their own flag too
     _is_blueprint_mutable: bool = False
@@ -610,6 +631,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
 
         combined_fields = {}
         combined_classvars = {}
+        missing_classvars: dict[str, Any] = {}
 
         # Inherit fields from parents in MRO (parents evaluated first so subclasses override them).
         # `cls` itself is excluded: __blueprint_fields__ doesn't exist yet (this loop is part of what builds it)
@@ -636,7 +658,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                 continue
 
             if _is_classvar(annotated_type):
-                _process_classvar(cls, name, annotated_type, combined_classvars)
+                _process_classvar(cls, name, annotated_type, combined_classvars, missing_classvars)
                 continue
 
             actual_type = annotated_type
@@ -705,6 +727,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
 
         cls.__blueprint_fields__ = combined_fields
         cls.__blueprint_classvars__ = combined_classvars
+        cls.__blueprint_classvars_without_values__ = tuple(missing_classvars)
 
     if not typing.TYPE_CHECKING:
         # type checking sees dataclass transform
