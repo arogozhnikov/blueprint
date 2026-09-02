@@ -10,6 +10,7 @@ runtime dependency of blueprint).
 # pyrefly: ignore-errors
 
 import unittest
+from typing import Annotated, Literal
 
 import pydantic
 
@@ -109,6 +110,38 @@ class TestPydanticIntegration(unittest.TestCase):
         settings = Settings(server=ServerCfg())
         with self.assertRaises(AttributeError):
             settings.server.port = 1234
+
+    def test_default_factory_recognized_behind_annotated_type_alias(self):
+        # regression test: annotated Union wasn't handled properly.
+        class TransportA(BlueprintCfg):
+            kind: Literal["a"] = "a"
+
+
+        class TransportB(BlueprintCfg):
+            kind: Literal["b"] = "b"
+
+        TransportCfg = Annotated[TransportA | TransportB, "any comment"]
+
+        class ConnectionCfg(BlueprintCfg):
+            transport: TransportCfg = field(default_factory=TransportA)
+
+
+        cfg = ConnectionCfg()  # must not raise "missing required keyword-only argument"
+        self.assertIsInstance(cfg.transport, TransportA)
+
+        # Still overridable like any other field
+        cfg2 = ConnectionCfg(transport=TransportB())
+        self.assertIsInstance(cfg2.transport, TransportB)
+
+        # Each instance gets its own factory-produced value (no shared mutable default)
+        self.assertIsNot(cfg.transport, ConnectionCfg().transport)
+
+        # Also works when ConnectionCfg itself is used from within a pydantic model
+        class Settings(pydantic.BaseModel):
+            conn: ConnectionCfg = pydantic.Field(default_factory=ConnectionCfg)
+
+        settings = Settings()
+        self.assertIsInstance(settings.conn.transport, TransportA)
 
     def test_subclass_instance_accepted(self):
         class AdminServerCfg(ServerCfg):

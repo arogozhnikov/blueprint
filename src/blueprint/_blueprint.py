@@ -640,6 +640,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                 continue
 
             actual_type = annotated_type
+            new_field_info = None
             if get_origin(annotated_type) is Annotated:
                 args = get_args(annotated_type)
                 actual_type = args[0]
@@ -647,17 +648,19 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                     if isinstance(meta, FieldInfo):
                         new_field_info = meta
                         break
+                # else: the Annotated[...] metadata carries no FieldInfo of its own -- fall
+                # through below to check other options, assuming first argument of Annotated is a type.
+
+            if new_field_info is None:
+                if hasattr(cls, name) and name in cls.__dict__:
+                    val = cls.__dict__[name]
+                    if isinstance(val, FieldInfo):
+                        new_field_info = val
+                    else:
+                        new_field_info = FieldInfo(default=val)
                 else:
+                    # just type annotation
                     new_field_info = FieldInfo()
-            elif hasattr(cls, name) and name in cls.__dict__:
-                val = cls.__dict__[name]
-                if isinstance(val, FieldInfo):
-                    new_field_info = val
-                else:
-                    new_field_info = FieldInfo(default=val)
-            else:
-                # just type annotation
-                new_field_info = FieldInfo()
 
             # If field already existed, merge inherited values
             if name in combined_fields:
