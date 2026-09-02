@@ -6,7 +6,7 @@ import types
 import typing
 import warnings
 from abc import ABCMeta
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import (
     Annotated,
     Any,
@@ -20,20 +20,6 @@ from typing import (
     get_origin,
     overload,
 )
-
-__all__ = [
-    "BlueprintCfg",
-    "ConfigDict",
-    "ConfigList",
-    "FieldInfo",
-    "InvalidBlueprintError",
-    "check_type",
-    "dangerously_all_mutable",
-    "debug_prohibit_mutability",
-    "field",
-    "format",
-    "unused",
-]
 
 
 class _Unused:
@@ -112,6 +98,7 @@ class FieldInfo:
     le: Any = unused
     gt: Any = unused
     ge: Any = unused
+    unchecked: bool = False  # we have unchecked_field
     # Resolved later, from the field's type annotation -- not a constructor argument.
     type: Any = dataclasses.field(default=Any, init=False)
 
@@ -129,6 +116,8 @@ class FieldInfo:
             result += f", x > {self.gt}"
         if self.ge is not unused:
             result += f", x >= {self.ge}"
+        if self.unchecked:
+            result += ", unchecked=True"
         return result
 
     def __post_init__(self):
@@ -151,6 +140,7 @@ class FieldInfo:
             self.gt = parent.gt
         if self.ge is unused:
             self.ge = parent.ge
+        # do not use parent's unchecked
 
     def check_bound_error(self, cls_name: str, field_name: str, value: Any) -> list[str]:
         """Checks a single already-type-checked value against this field's lt/le/gt/ge bounds."""
@@ -200,6 +190,26 @@ def field(
     """Helper to define field metadata."""
 
     return FieldInfo(default=default, default_factory=default_factory, lt=lt, le=le, gt=gt, ge=ge)
+
+
+# overloads allow default or default_factory, but not both
+@overload
+def unchecked_field(*, default: _T | _Unused = unused) -> _T: ...
+@overload
+def unchecked_field(*, default_factory: Callable[[], _T]) -> _T: ...
+def unchecked_field(
+    *,
+    default: Any = unused,
+    default_factory: Callable[[], Any] | _Unused = unused,
+) -> Any:
+    """Bypass normal checks, use as a last resort.
+    Only type is checked, immutability isn't.
+
+        class TrainCfg(BlueprintCfg):
+            model: torch.nn.Module = unchecked_field()
+    """
+
+    return FieldInfo(default=default, default_factory=default_factory, unchecked=True)
 
 
 def check_type(value: Any, expected_type: Any) -> bool:
@@ -587,7 +597,7 @@ class _BlueprintCfgMeta(ABCMeta):
         super().__delattr__(name)
 
 
-@dataclass_transform(kw_only_default=True, field_specifiers=(field,))
+@dataclass_transform(kw_only_default=True, field_specifiers=(field, unchecked_field))
 class BlueprintCfg(metaclass=_BlueprintCfgMeta):
     __blueprint_fields__: dict[str, FieldInfo]
     __blueprint_classvars__: dict[str, Any]
@@ -796,6 +806,17 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             field_strs.append(f"{name}={repr(val)}")
         return f"{self.__class__.__name__}({', '.join(field_strs)})"
 
+    def as_dict(self) -> dict[str, Any]:
+        """Recursively converts this config into plain `dict` / `list` / `tuple` containers."""
+        return {name: _as_dict_value(getattr(self, name)) for name in self.__blueprint_fields__}
+
+    def as_dict_selected_fields(self, selected: list[str]) -> dict[str, Any]:
+        """Like `as_dict()`, but includes only the given fields."""
+        unknown = [name for name in selected if name not in self.__blueprint_fields__]
+        if unknown:
+            raise TypeError(f"as_dict_selected_fields() got unexpected field names: {', '.join(map(repr, unknown))}")
+        return {name: _as_dict_value(getattr(self, name)) for name in selected}
+
     def __eq__(self, other):
         if self.__class__ is not other.__class__:
             return NotImplemented
@@ -810,7 +831,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         return (_construct_blueprint_cfg, (type(self), kwargs))
 
     @contextlib.contextmanager
-    def mutable_copy(self) -> Iterator[Self]:
+    def mutable_copy(self) -> Generator[Self]:
         """Context manager yielding an independent, deep, mutable copy of this instance.
 
             with x.mutable_copy() as y:
@@ -867,6 +888,19 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
                         stacklevel=2,
                     )
                     # just keep propagating previous exception
+
+
+def _as_dict_value(value: Any) -> Any:
+    """Recursive helper backing `BlueprintCfg.as_dict()` / `as_dict_selected_fields()`."""
+    if isinstance(value, BlueprintCfg):
+        return value.as_dict()
+    if isinstance(value, (ConfigList, list)):
+        return [_as_dict_value(item) for item in value]
+    if isinstance(value, (ConfigDict, dict)):
+        return {key: _as_dict_value(val) for key, val in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_as_dict_value(item) for item in value)
+    return value
 
 
 def _format_leaf(value: Any) -> str:

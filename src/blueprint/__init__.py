@@ -22,6 +22,7 @@ from ._blueprint import (
     debug_prohibit_mutability,
     field,
     format,
+    unchecked_field,
     unused,
 )
 
@@ -37,4 +38,5 @@ __all__ = [
     "debug_prohibit_mutability",
     "field",
     "format",
+    "unchecked_field",
 ]

@@ -181,7 +181,7 @@ assert retry.max_attempts == 1  # the object `retry` still points at is untouche
 Returned lists / dicts fields are not lists, but their immutable subclasses.
 This is usually correct decision, as you should not modify configs or config fields, but also can be confusing if some deeper code assumes the list is modifiable.
 
-There is no yaml/json serialization, on purpose. 
+There is no yaml/json (de)serialization, on purpose -- `as_dict()` gets you a plain dict view, but there's no `from_dict()` back (and there shouldn't be!).
 There is a readable reproducible formatting, also on purpose.
 
 ## Errors
@@ -226,6 +226,16 @@ with blueprint.dangerously_all_mutable():
 with blueprint.debug_prohibit_mutability():
     with cfg.mutable_copy() as y:  # raises RuntimeError
         ...
+```
+
+One can store arbitraty fields in blueprint with `unchecked_field`, however this is a bad idea in general, and discouraged. You also lose any mutability guarantees.
+
+```python
+from blueprint import BlueprintCfg, unchecked_field
+
+class TrainCfg(BlueprintCfg):
+    name: str
+    model: torch.nn.Module = unchecked_field()
 ```
 
 ## Example
