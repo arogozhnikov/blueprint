@@ -10,7 +10,7 @@ import pickle
 import unittest
 import warnings
 from datetime import datetime, timedelta
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar, Generic, Literal, TypeVar
 
 import blueprint
 from blueprint import BlueprintCfg, ConfigDict, ConfigList, InvalidBlueprintError, field
@@ -1402,6 +1402,173 @@ class TestDebugProhibitMutability(unittest.TestCase):
         self.assertEqual(x.value, 2)
 
 
+class TestGenerics(unittest.TestCase):
+    """
+    Covers: `BlueprintCfg` subclasses that are also `Generic[T]`.
+    Multiple nasty cases of derivation.
+    """
+
+    def test_unresolved_typevar_behaves_like_any(self):
+        T = TypeVar("T")
+
+        class PlainGenericBase(BlueprintCfg, Generic[T]):
+            x: list[T]
+
+        PlainGenericBase(x=[1, 2])
+
+        class PlainDerived(PlainGenericBase):
+            pass
+
+        # No type argument supplied anywhere -- `T` stays unresolved and unconstrained, so
+        # any item type is accepted, same as an untyped `list`.
+        cfg = PlainDerived(x=[1, 2, 3])
+        self.assertEqual(cfg.x, [1, 2, 3])
+        PlainDerived(x=["a", "b"])
+        PlainDerived(x=[])
+
+    def test_typevar_resolved_via_subscripted_base(self):
+        T = TypeVar("T")
+
+        class PlainGenericBase(BlueprintCfg, Generic[T]):
+            x: list[T]
+
+        class PlainDerivedAsInt(PlainGenericBase[int]):
+            pass
+
+        self.assertEqual(PlainDerivedAsInt.__blueprint_fields__["x"].type, list[int])
+
+        cfg = PlainDerivedAsInt(x=[1, 2, 3])
+        self.assertEqual(cfg.x, [1, 2, 3])
+
+        # Once resolved to int, non-int items are rejected like any other list[int] field.
+        # (A list item mismatch is a TypeError raised by ConfigList itself, not the
+        # InvalidBlueprintError that _validate_self() raises for a whole-field mismatch --
+        # same as every other list[...] field in the library.)
+        with self.assertRaises(TypeError):
+            PlainDerivedAsInt(x=["1", "2"])
+
+    def test_multiple_subclasses_of_same_generic_base_resolve_independently(self):
+        T = TypeVar("T")
+
+        class Box(BlueprintCfg, Generic[T]):
+            item: T
+
+        class IntBox(Box[int]):
+            pass
+
+        class StrBox(Box[str]):
+            pass
+
+        IntBox(item=1)
+        StrBox(item="a")
+
+        with self.assertRaises(InvalidBlueprintError):
+            IntBox(item="a")
+        with self.assertRaises(InvalidBlueprintError):
+            StrBox(item=1)
+
+    def test_multi_level_generic_inheritance_composes(self):
+        # T (Base) -> T2 (Mid) -> int (Concrete): the mapping must compose transitively,
+        # not just look at Concrete's immediate parent.
+        T = TypeVar("T")
+        T2 = TypeVar("T2")
+
+        class Base(BlueprintCfg, Generic[T]):
+            x: list[T]
+
+        class Mid(Base[T2], Generic[T2]):
+            pass
+
+        class Concrete(Mid[int]):
+            pass
+
+        self.assertEqual(Concrete.__blueprint_fields__["x"].type, list[int])
+
+        Concrete(x=[1, 2, 3])
+        with self.assertRaises(TypeError):
+            Concrete(x=["nope"])
+
+        # Mid itself is still generic (T2 unresolved) -- behaves like Any, same as the
+        # single-level case.
+        class MidDerivedDirectly(Mid):
+            pass
+
+        MidDerivedDirectly(x=["a", "b", 1])
+
+    def test_typevar_bound_restricts_unresolved_field(self):
+        class Animal(BlueprintCfg):
+            name: str
+
+        class Dog(Animal):
+            pass
+
+        class Rock:
+            pass
+
+        T = TypeVar("T", bound=Animal)
+
+        class Pen(BlueprintCfg, Generic[T]):
+            occupant: T
+
+        class AnyPen(Pen):
+            pass
+
+        # Unresolved, but bound to Animal -- Animal (and subclasses) are accepted...
+        AnyPen(occupant=Animal(name="Generic Animal"))
+        AnyPen(occupant=Dog(name="Rex"))
+
+        # ...but the bound is still enforced, unlike a plain unbound TypeVar.
+        with self.assertRaises(InvalidBlueprintError):
+            AnyPen(occupant=Rock())
+
+    def test_typevar_constraints_restrict_unresolved_field(self):
+        T = TypeVar("T", int, str)
+
+        class Cell(BlueprintCfg, Generic[T]):
+            value: T
+
+        class AnyCell(Cell):
+            pass
+
+        AnyCell(value=1)
+        AnyCell(value="a")
+
+        with self.assertRaises(InvalidBlueprintError):
+            AnyCell(value=1.5)
+
+    def test_generic_dict_field_resolved(self):
+        K = TypeVar("K")
+        V = TypeVar("V")
+
+        class Mapping_(BlueprintCfg, Generic[K, V]):
+            data: dict[K, V]
+
+        class StrToIntMapping(Mapping_[str, int]):
+            pass
+
+        self.assertEqual(StrToIntMapping.__blueprint_fields__["data"].type, dict[str, int])
+
+        StrToIntMapping(data={"a": 1})
+        with self.assertRaises(TypeError):
+            StrToIntMapping(data={"a": "not an int"})
+
+    def test_generic_field_nested_in_union_resolved(self):
+        T = TypeVar("T")
+
+        class OptionalBox(BlueprintCfg, Generic[T]):
+            item: T | None
+
+        class OptionalIntBox(OptionalBox[int]):
+            pass
+
+        self.assertEqual(OptionalIntBox.__blueprint_fields__["item"].type, int | None)
+
+        OptionalIntBox(item=1)
+        OptionalIntBox(item=None)
+        with self.assertRaises(InvalidBlueprintError):
+            OptionalIntBox(item="a")
+
+
 class TestExampleScript(unittest.TestCase):
     """Covers: `examples/example.py` stays in sync with the library and runs cleanly."""
 
@@ -1414,16 +1581,9 @@ class TestExampleScript(unittest.TestCase):
         example_path = repo_root / "examples" / "example.py"
         self.assertTrue(example_path.exists(), f"expected {example_path} to exist")
 
-        env = dict(**__import__("os").environ)
-        # Make sure the example imports this checkout's `blueprint`, not some other
-        # installed version, regardless of whether the package is pip-installed.
-        src_path = str(repo_root / "src")
-        env["PYTHONPATH"] = src_path + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-
         result = subprocess.run(
             [sys.executable, str(example_path)],
             cwd=repo_root,
-            env=env,
             capture_output=True,
             text=True,
             timeout=30,
