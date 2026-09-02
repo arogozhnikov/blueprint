@@ -5,6 +5,7 @@
 
 import copy
 import enum
+import inspect
 import pickle
 import unittest
 import warnings
@@ -981,7 +982,9 @@ class TestInvalidBlueprintError(unittest.TestCase):
 class TestClassVar(unittest.TestCase):
     """Covers: `ClassVar`-annotated attributes. Unlike regular fields, they're class-level
     state -- type-checked once at class-creation time (not per instance) and, once the
-    owning class exists, locked against further reassignment or deletion."""
+    owning class exists, locked against further reassignment or deletion. A ClassVar with no
+    value anywhere in the MRO doesn't raise -- it makes the class abstract (uninstantiable)
+    until some subclass supplies one."""
 
     def test_excluded_from_fields_and_instance_construction(self):
         class ServerCfg(BlueprintCfg):
@@ -1004,11 +1007,46 @@ class TestClassVar(unittest.TestCase):
             class BadCfg(BlueprintCfg):
                 kind: ClassVar[str] = 123  # type: ignore
 
-    def test_missing_value_raises_at_class_creation_time(self):
-        with self.assertRaises(InvalidBlueprintError):
+    def test_missing_value_makes_class_abstract_instead_of_raising(self):
+        # No value anywhere in the MRO no longer raises at class-creation time -- it marks
+        # the class abstract (via the same __abstractmethods__ mechanism ABCMeta uses for
+        # @abstractmethod), so it can be defined and subclassed, just not instantiated.
+        class NoValueCfg(BlueprintCfg):
+            kind: ClassVar[str]
+            host: str = "localhost"
 
-            class NoValueCfg(BlueprintCfg):
-                kind: ClassVar[str]
+        self.assertEqual(NoValueCfg.__blueprint_classvars_without_values__, ("kind",))
+        self.assertTrue(inspect.isabstract(NoValueCfg))
+
+        with self.assertRaises(TypeError):
+            NoValueCfg()
+
+    def test_subclass_supplying_missing_value_becomes_instantiable(self):
+        class NoValueCfg(BlueprintCfg):
+            kind: ClassVar[str]
+
+        class ServerCfg(NoValueCfg):
+            kind: ClassVar[str] = "server"
+
+        self.assertEqual(ServerCfg.__blueprint_classvars_without_values__, ())
+        self.assertFalse(inspect.isabstract(ServerCfg))
+
+        cfg = ServerCfg()
+        self.assertEqual(cfg.kind, "server")
+
+    def test_grandchild_without_override_stays_abstract(self):
+        # Recomputed fresh for every class in the chain -- a grandchild that still doesn't
+        # supply a value stays abstract, it doesn't matter that its immediate parent is
+        # itself abstract rather than the class that first declared the ClassVar.
+        class NoValueCfg(BlueprintCfg):
+            kind: ClassVar[str]
+
+        class StillAbstractCfg(NoValueCfg):
+            host: str = "localhost"
+
+        self.assertEqual(StillAbstractCfg.__blueprint_classvars_without_values__, ("kind",))
+        with self.assertRaises(TypeError):
+            StillAbstractCfg()
 
     def test_bare_classvar_accepts_any_value(self):
         class AnyKindCfg(BlueprintCfg):
