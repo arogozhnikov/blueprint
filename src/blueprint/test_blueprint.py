@@ -277,6 +277,56 @@ class TestBlueprintCfg(unittest.TestCase):
         self.assertEqual(cfg.items, [1, "two", 3.0])
         self.assertEqual(cfg.mapping, {"a": 1})
 
+    def test_frozenset_field_type_checking(self):
+        class FrozenSetCfg(BlueprintCfg):
+            tags: frozenset[str]
+            numbers: frozenset[int] = field(default_factory=frozenset)
+
+        cfg = FrozenSetCfg(tags=frozenset({"a", "b"}))
+        self.assertEqual(cfg.tags, frozenset({"a", "b"}))
+        self.assertIsInstance(cfg.tags, frozenset)
+        self.assertEqual(cfg.numbers, frozenset())
+
+        with self.assertRaises(TypeError):
+            FrozenSetCfg(tags=frozenset({"a", 1}))  # wrong item type
+
+        with self.assertRaises(TypeError):
+            FrozenSetCfg(tags={"a", "b"})  # plain (mutable) set is not a frozenset
+
+        with cfg.mutable_copy() as y:
+            y.tags = frozenset({"x", "y", "z"})
+            self.assertEqual(y.tags, frozenset({"x", "y", "z"}))
+            with self.assertRaises(InvalidBlueprintError):
+                y.tags = frozenset({"x", 1})
+
+        self.assertEqual(cfg.tags, frozenset({"a", "b"}))  # original untouched
+
+        with self.assertRaises(AttributeError):
+            cfg.tags = frozenset({"nope"})  # frozen outside mutable_copy()
+
+    def test_frozenset_does_not_alias_source(self):
+        # Same "everything is cloned on the way in" guarantee as list/dict/tuple fields --
+        # frozensets are themselves immutable, but the guarantee is still worth pinning down.
+        class FrozenSetCfg(BlueprintCfg):
+            tags: frozenset[str]
+
+        source = frozenset({"a", "b"})
+        cfg = FrozenSetCfg(tags=source)
+        self.assertEqual(cfg.tags, source)
+        self.assertIsNot(cfg.tags, source)
+
+    def test_bare_frozenset_annotation_is_still_type_checked(self):
+        # Same rationale as test_bare_collection_annotations_are_still_wrapped: bare
+        # `frozenset` (no subscript) should behave like frozenset[Any].
+        class BareFrozenSetCfg(BlueprintCfg):
+            items: frozenset
+
+        cfg = BareFrozenSetCfg(items=frozenset({1, "two", 3.0}))
+        self.assertEqual(cfg.items, frozenset({1, "two", 3.0}))
+
+        with self.assertRaises(TypeError):
+            BareFrozenSetCfg(items=[1, 2])  # a list isn't a frozenset
+
     def test_nested_configs_in_collections(self):
         class ConfigListCfg(BlueprintCfg):
             children: list[ChildCfg]
@@ -513,8 +563,9 @@ class TestAsDict(unittest.TestCase):
             point: tuple[int, int] = (1, 2)
             mapping: dict[str, int] = field(default_factory=dict)
             children: list[ChildCfg] = field(default_factory=list)
+            tags: frozenset[str] = field(default_factory=frozenset)
 
-        n = Nested(mapping={"a": 1}, children=[ChildCfg(name="c1")])
+        n = Nested(mapping={"a": 1}, children=[ChildCfg(name="c1")], tags=frozenset({"x", "y"}))
         d = n.as_dict()
         self.assertEqual(
             d,
@@ -523,12 +574,14 @@ class TestAsDict(unittest.TestCase):
                 "point": (1, 2),
                 "mapping": {"a": 1},
                 "children": [{"name": "c1", "value": 10}],
+                "tags": frozenset({"x", "y"}),
             },
         )
         self.assertIs(type(d["point"]), tuple)
         self.assertIs(type(d["mapping"]), dict)
         self.assertIs(type(d["children"]), list)
         self.assertIs(type(d["children"][0]), dict)
+        self.assertIs(type(d["tags"]), frozenset)
 
     def test_as_dict_does_not_alias_internal_containers(self):
         # Mutating the returned dict/list must not affect the original config.
@@ -563,6 +616,27 @@ class TestAsDict(unittest.TestCase):
     def test_as_dict_selected_fields_empty_string(self):
         p = ParentCfg(child=ChildCfg(name="A", value=1))
         self.assertEqual(p.as_dict_selected_fields([]), {})
+
+
+class TestFormat(unittest.TestCase):
+    """Covers: `blueprint.format()`, specifically the frozenset rendering -- frozenset
+    iteration order isn't guaranteed, so format() sorts by repr() to stay deterministic."""
+
+    def test_format_frozenset_is_sorted_and_deterministic(self):
+        class FrozenSetCfg(BlueprintCfg):
+            tags: frozenset[str] = field(default_factory=frozenset)
+
+        cfg = FrozenSetCfg(tags=frozenset({"charlie", "alpha", "bravo"}))
+        self.assertEqual(
+            blueprint.format(cfg),
+            "FrozenSetCfg(tags=frozenset({'alpha', 'bravo', 'charlie'}))",
+        )
+
+    def test_format_empty_frozenset(self):
+        class FrozenSetCfg(BlueprintCfg):
+            tags: frozenset[str] = field(default_factory=frozenset)
+
+        self.assertEqual(blueprint.format(FrozenSetCfg()), "FrozenSetCfg(tags=frozenset())")
 
 
 class TestEquality(unittest.TestCase):
