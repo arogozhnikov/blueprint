@@ -212,6 +212,55 @@ def unchecked_field(
     return FieldInfo(default=default, default_factory=default_factory, unchecked=True)
 
 
+def _substitute_typevars(tp: Any, typevar_mapping: dict[TypeVar, Any]) -> Any:
+    """Recursively replaces TypeVars in type `tp` using typevar_mapping;
+    Recursion is needed for nested generics (`list[T]`, `dict[str, T]`, `T | None`, ...)
+    """
+    if isinstance(tp, TypeVar):
+        return typevar_mapping.get(tp, tp)
+
+    args = get_args(tp)
+    if not args:
+        return tp
+
+    new_args = tuple(_substitute_typevars(arg, typevar_mapping) for arg in args)
+    if new_args == args:
+        return tp
+
+    if isinstance(tp, types.UnionType):
+        # `X | Y` reconstructs via the `|` operator -- types.UnionType isn't subscriptable
+        result = new_args[0]
+        for arg in new_args[1:]:
+            result = result | arg
+        return result
+
+    origin = get_origin(tp)
+    if origin is None:
+        # get_args() returned something (we wouldn't be here otherwise) but get_origin()
+        # doesn't recognize it -- not expected to happen for any real type expression, but
+        # nothing to substitute into if it does.
+        return tp
+    return origin[new_args]
+
+
+def _build_typevar_mapping(cls) -> dict[TypeVar, Any]:
+    """Composes one TypeVar -> concrete-type mapping for `cls`, by walking every generic
+    parameterization from `cls` itself up through its whole MRO."""
+    mapping: dict[TypeVar, Any] = {}
+    for klass in cls.__mro__:
+        for orig_base in getattr(klass, "__orig_bases__", ()):
+            origin = get_origin(orig_base)
+            if origin is None:
+                continue
+            params = getattr(origin, "__parameters__", ())
+            if not params:
+                continue
+            for param, arg in zip(params, get_args(orig_base)):
+                if param not in mapping:  # a more-derived class already won for this TypeVar
+                    mapping[param] = _substitute_typevars(arg, mapping)
+    return mapping
+
+
 def check_type(value: Any, expected_type: Any) -> bool:
     """Recursively validates if a value matches the expected type constraint."""
     if expected_type is None or expected_type is type(None):
@@ -219,6 +268,13 @@ def check_type(value: Any, expected_type: Any) -> bool:
 
     if expected_type is Any:
         return True
+
+    if isinstance(expected_type, TypeVar):  # unresolved typevar
+        if expected_type.__constraints__:  # any of constraints
+            return any(check_type(value, c) for c in expected_type.__constraints__)
+        if expected_type.__bound__ is not None:  # check bound (can be only one)
+            return check_type(value, expected_type.__bound__)
+        return True  # no bounds and no constraints
 
     origin = get_origin(expected_type)
     args = get_args(expected_type)
@@ -598,7 +654,7 @@ class _BlueprintCfgMeta(ABCMeta):
         cls = super().__new__(mcls, name, bases, namespace, **kwargs)
 
         no_defaults = getattr(cls, "__blueprint_classvars_without_values__", ())
-        if no_defaults: 
+        if no_defaults:
             # no default for classvar -> make class abstract (can't create instances)
             # actual job is done by ABCMeta in this case.
             cls.__abstractmethods__ = frozenset(cls.__abstractmethods__) | frozenset(no_defaults)
@@ -652,10 +708,17 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         except NameError:  # in case forward-references can't be resovled, or "a local class"
             annotations = _local_annotations
 
+        # Mapping typevars to resolved types, e.g. for MyClass(BlueprintCfg, Generic[T]);
+        #   and then Derived(Base[float])
+        typevar_mapping = _build_typevar_mapping(cls)
+
         # Process field metadata and defaults
         for name, annotated_type in annotations.items():
             if name.startswith("_"):
                 continue
+
+            if typevar_mapping:
+                annotated_type = _substitute_typevars(annotated_type, typevar_mapping)
 
             if _is_classvar(annotated_type):
                 _process_classvar(cls, name, annotated_type, combined_classvars, missing_classvars)
@@ -869,7 +932,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         - model_dump(mode="python") (the default) keeps the instance as-is.
         """
         from pydantic import GetCoreSchemaHandler  # type: ignore
-        from pydantic_core import core_schema
+        from pydantic_core import core_schema  # type: ignore
 
         handler = typing.cast(GetCoreSchemaHandler, handler)
 

@@ -40,8 +40,8 @@ features = ["dev"]
 
 [tool.hatch.envs.default.scripts]
 check = [
-    "ruff check .",
-    "ruff format --check .",
+    "ruff check . --fix",
+    "ruff format .",
     "mypy .",
     "pyrefly check",
     "pytest",

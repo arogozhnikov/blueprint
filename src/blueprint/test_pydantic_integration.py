@@ -116,7 +116,6 @@ class TestPydanticIntegration(unittest.TestCase):
         class TransportA(BlueprintCfg):
             kind: Literal["a"] = "a"
 
-
         class TransportB(BlueprintCfg):
             kind: Literal["b"] = "b"
 
@@ -124,7 +123,6 @@ class TestPydanticIntegration(unittest.TestCase):
 
         class ConnectionCfg(BlueprintCfg):
             transport: TransportCfg = field(default_factory=TransportA)
-
 
         cfg = ConnectionCfg()  # must not raise "missing required keyword-only argument"
         self.assertIsInstance(cfg.transport, TransportA)
