@@ -156,7 +156,7 @@ cfg = cfg.model_copy(
 with cfg.mutable_copy() as cfg:
     cfg.retry.max_attempts = 10
 ```
-Additinally, multiple change paths in pydantic do not trigger revalidation - poor behaviour for configs.
+Additionally, multiple change paths in pydantic do not trigger revalidation - poor behaviour for configs.
 
 
 ## Important gotchas
@@ -183,6 +183,7 @@ This is usually correct decision, as you should not modify configs or config fie
 
 There is no yaml/json (de)serialization, on purpose -- `as_dict()` gets you a plain dict view, but there's no `from_dict()` back (and there shouldn't be!).
 There is a readable reproducible formatting, also on purpose.
+
 
 ## Errors
 
@@ -238,7 +239,7 @@ class TrainCfg(BlueprintCfg):
     model: torch.nn.Module = unchecked_field()
 ```
 
-## Example
+## Show me some examples!
 
 `examples/example.py` is a runnable, commented tour of everything above (and is covered by
 a test that runs it, so it can't silently drift out of date):
@@ -251,8 +252,16 @@ python examples/example.py
 ## Development
 
 ```bash
+hatch run check   # ruff check + ruff format --check + mypy + pyrefly + pytest, in one go
+```
+
+Or run the pieces individually:
+
+```bash
 uv pip install -e ".[dev]"
 pytest
 ruff format .
 ruff check .
+mypy .
+pyrefly check
 ```
