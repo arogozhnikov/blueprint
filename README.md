@@ -63,10 +63,10 @@ assert new_cfg.port == 9000
 ```
 
 Fields support plain types, `Optional`/`Union`, `Literal`, `Enum`, nested
-`BlueprintCfg` classes, and `list[T]` / `dict[K, V]` / `tuple[...]`
-collections, all recursively type-checked on construction and on every
-mutation. `blueprint.format()` pretty-prints a config (and its nested
-configs/collections), wrapping long lines for readability.
+`BlueprintCfg` classes, and `list[T]` / `dict[K, V]` / `tuple[...]` /
+`frozenset[T]` collections, all recursively type-checked on construction and
+on every mutation. `blueprint.format()` pretty-prints a config (and its
+nested configs/collections), wrapping long lines for readability.
 
 ## Nested configs and collections
 

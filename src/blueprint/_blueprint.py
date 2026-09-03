@@ -293,8 +293,8 @@ def check_type(value: Any, expected_type: Any) -> bool:
     if origin is Literal:
         return any(type(value) is type(arg) and value == arg for arg in args)
 
-    # Handle Collection types (list, tuple, dict)
-    if origin in (list, tuple, dict):
+    # Handle Collection types (list, tuple, dict, frozenset)
+    if origin in (list, tuple, dict, frozenset):
         if origin is list:
             if not isinstance(value, list):
                 return False
@@ -323,6 +323,14 @@ def check_type(value: Any, expected_type: Any) -> bool:
             if args:
                 key_type, val_type = args
                 return all(check_type(k, key_type) and check_type(v, val_type) for k, v in value.items())
+            return True
+
+        elif origin is frozenset:
+            if not isinstance(value, frozenset):
+                return False
+            if args:
+                item_type = args[0]
+                return all(check_type(item, item_type) for item in value)
             return True
 
     # Handle Enum
@@ -542,6 +550,9 @@ def _flat_iter_containers(value):
     elif isinstance(value, tuple):
         for item in value:
             yield from _flat_iter_containers(item)
+    elif isinstance(value, frozenset):
+        for item in value:
+            yield from _flat_iter_containers(item)
     # list/dict can't appear here, and are expected to be converted before calling this func
 
 
@@ -569,12 +580,12 @@ def _convert_value(value, expected_type):
         origin = get_origin(expected_type)
         args = get_args(expected_type)
 
-    # Bare `list`/`dict`/`tuple` (no subscript) are plain classes, not generic aliases --
-    # get_origin() returns None for them, unlike their typing.List/Dict/Tuple counterparts
-    # or a subscripted list[...]/dict[...]/tuple[...]. Treat them the same as their
-    # unconstrained (Any-typed) parameterized form so they still get wrapped in the
-    # validating/immutable proxy instead of silently passing through as plain containers.
-    if expected_type in (list, dict, tuple):
+    # Bare `list`/`dict`/`tuple`/`frozenset` (no subscript) are plain classes, not generic
+    # aliases -- get_origin() returns None for them, unlike their typing.List/Dict/Tuple
+    # counterparts or a subscripted list[...]/dict[...]/tuple[...]/frozenset[...]. Treat them
+    # the same as their unconstrained (Any-typed) parameterized form so they still get wrapped
+    # in the validating/immutable proxy instead of silently passing through as plain containers.
+    if expected_type in (list, dict, tuple, frozenset):
         origin = expected_type
 
     if origin is list:
@@ -602,6 +613,12 @@ def _convert_value(value, expected_type):
             key_type = args[0] if args and len(args) >= 1 else Any
             val_type = args[1] if args and len(args) >= 2 else Any
             return ConfigDict(value, key_type, val_type)
+        return value
+
+    if origin is frozenset:
+        if isinstance(value, frozenset):
+            item_type = args[0] if args else Any
+            return frozenset(_convert_value(item, item_type) for item in value)
         return value
 
     return value
@@ -896,7 +913,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
         return f"{self.__class__.__name__}({', '.join(field_strs)})"
 
     def as_dict(self) -> dict[str, Any]:
-        """Recursively converts this config into plain `dict` / `list` / `tuple` containers."""
+        """Recursively converts this config into plain `dict` / `list` / `tuple` / `frozenset` containers."""
         return {name: _as_dict_value(getattr(self, name)) for name in self.__blueprint_fields__}
 
     def as_dict_selected_fields(self, selected: list[str]) -> dict[str, Any]:
@@ -1031,6 +1048,8 @@ def _as_dict_value(value: Any) -> Any:
         return {key: _as_dict_value(val) for key, val in value.items()}
     if isinstance(value, tuple):
         return tuple(_as_dict_value(item) for item in value)
+    if isinstance(value, frozenset):
+        return frozenset(_as_dict_value(item) for item in value)
     return value
 
 
@@ -1078,6 +1097,13 @@ def _format_value(value: Any, indent: int, linewidth: int, level: int) -> str:
             for k, v in value.items()
         ]
         return _format_wrap("{", parts, "}", indent, linewidth, level)
+    if isinstance(value, frozenset):
+        if not value:
+            return "frozenset()"
+        # Iteration order isn't guaranteed (and elements aren't always mutually orderable) --
+        # sort by repr() so format() stays deterministic.
+        parts = [_format_value(item, indent, linewidth, level + 1) for item in sorted(value, key=repr)]
+        return _format_wrap("frozenset({", parts, "})", indent, linewidth, level)
     return _format_leaf(value)
 
 
