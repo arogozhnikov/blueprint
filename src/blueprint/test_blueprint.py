@@ -9,6 +9,7 @@ import inspect
 import pickle
 import unittest
 import warnings
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Annotated, ClassVar, Generic, Literal, TypeVar
 
@@ -326,6 +327,140 @@ class TestBlueprintCfg(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             BareFrozenSetCfg(items=[1, 2])  # a list isn't a frozenset
+
+    def test_mapping_type_checking_and_mutation(self):
+        # Mapping[K, V] accepts anything satisfying the Mapping protocol; a plain dict given
+        # for one is wrapped into ConfigDict just like dict[K, V] is.
+        class MappingCfg(BlueprintCfg):
+            data: Mapping[str, int]
+
+        cfg = MappingCfg(data={"a": 1, "b": 2})
+        self.assertEqual(cfg.data, {"a": 1, "b": 2})
+        self.assertIsInstance(cfg.data, ConfigDict)
+
+        with self.assertRaises(TypeError):
+            MappingCfg(data={"a": "not-an-int"})  # wrong value type
+
+        with self.assertRaises(TypeError):
+            MappingCfg(data={1: 1})  # wrong key type
+
+        with self.assertRaises(TypeError):
+            MappingCfg(data=[("a", 1)])  # a list of pairs isn't a Mapping
+
+        with cfg.mutable_copy() as y:
+            y.data["c"] = 3
+            with self.assertRaises(TypeError):
+                y.data["d"] = "nope"
+        self.assertEqual(cfg.data, {"a": 1, "b": 2})  # original untouched
+
+    def test_sequence_type_checking_and_mutation(self):
+        # Sequence[T] accepts list, tuple, ... but deliberately not str/bytes -- treating a
+        # single string as "a sequence of its characters" is virtually never intended. A plain
+        # list given for one is wrapped into ConfigList just like list[T] is; a tuple is left
+        # as a tuple (already immutable, nothing to wrap).
+        class SequenceCfg(BlueprintCfg):
+            items: Sequence[int]
+
+        cfg = SequenceCfg(items=[1, 2, 3])
+        self.assertEqual(cfg.items, [1, 2, 3])
+        self.assertIsInstance(cfg.items, ConfigList)
+
+        cfg_tuple = SequenceCfg(items=(1, 2, 3))
+        self.assertEqual(cfg_tuple.items, (1, 2, 3))
+        self.assertIsInstance(cfg_tuple.items, tuple)
+        self.assertNotIsInstance(cfg_tuple.items, ConfigList)
+
+        with self.assertRaises(TypeError):
+            SequenceCfg(items=["a", "b"])  # wrong item type
+
+        with self.assertRaises(TypeError):
+            SequenceCfg(items="12")  # a str isn't accepted, even though it's a Sequence[str]
+
+        with self.assertRaises(TypeError):
+            SequenceCfg(items={1: 2})  # a dict isn't a Sequence
+
+        with cfg.mutable_copy() as y:
+            y.items.append(4)
+            with self.assertRaises(TypeError):
+                y.items.append("nope")
+        self.assertEqual(cfg.items, [1, 2, 3])  # original untouched
+
+    def test_mapping_and_sequence_fields_accept_none(self):
+        # Mapping[K, V] | None / Sequence[T] | None: the common "optional collection" shape.
+        class OptionalCollectionsCfg(BlueprintCfg):
+            mapping: Mapping[str, int] | None
+            sequence: Sequence[int] | None
+
+        cfg_none = OptionalCollectionsCfg(mapping=None, sequence=None)
+        self.assertIsNone(cfg_none.mapping)
+        self.assertIsNone(cfg_none.sequence)
+
+        cfg = OptionalCollectionsCfg(mapping={"a": 1}, sequence=[1, 2])
+        self.assertEqual(cfg.mapping, {"a": 1})
+        self.assertEqual(cfg.sequence, [1, 2])
+
+        with self.assertRaises(TypeError):
+            OptionalCollectionsCfg(mapping={"a": "not-an-int"}, sequence=[1, 2])
+
+        with self.assertRaises(TypeError):
+            OptionalCollectionsCfg(mapping={"a": 1}, sequence=["not-an-int"])
+
+        with cfg.mutable_copy() as y:
+            y.mapping = None
+            y.sequence = None
+            self.assertIsNone(y.mapping)
+            self.assertIsNone(y.sequence)
+            with self.assertRaises(TypeError):
+                y.mapping = ["not-a-mapping"]
+            with self.assertRaises(TypeError):
+                y.sequence = {"not": "a-sequence"}
+
+    def test_bare_mapping_and_sequence_annotations_are_still_wrapped(self):
+        # Same rationale as test_bare_collection_annotations_are_still_wrapped, for the
+        # collections.abc forms: bare `Mapping`/`Sequence` (no subscript) should behave like
+        # their Any-typed parameterized form, and still get wrapped in the validating/immutable
+        # proxy rather than passing through as a plain dict/list.
+        class BareMappingSequenceCfg(BlueprintCfg):
+            mapping: Mapping
+            sequence: Sequence
+
+        cfg = BareMappingSequenceCfg(mapping={"a": 1}, sequence=[1, "two", 3.0])
+        self.assertIsInstance(cfg.mapping, ConfigDict)
+        self.assertIsInstance(cfg.sequence, ConfigList)
+
+        with self.assertRaises(AttributeError):
+            cfg.mapping["b"] = 2
+        with self.assertRaises(AttributeError):
+            cfg.sequence.append(4)
+
+    def test_callable_type_checking(self):
+        # Callable (bare) and Callable[[Arg, ...], Ret]: only `callable(value)` is checked --
+        # argument/return types are never inspected (see check_type()'s Callable branch).
+        class CallableCfg(BlueprintCfg):
+            bare: Callable
+            typed: Callable[[int, str], float]
+
+        def fn(x: int, y: str) -> float:
+            return float(x) + len(y)
+
+        cfg = CallableCfg(bare=fn, typed=fn)
+        self.assertIs(cfg.bare, fn)
+        self.assertIs(cfg.typed, fn)
+
+        # Any callable is accepted for the typed field, regardless of its actual signature --
+        # blueprint does not check Callable argument/return types.
+        cfg2 = CallableCfg(bare=len, typed=lambda: 0)  # wrong arity for Callable[[int, str], float]
+        self.assertEqual(cfg2.typed(), 0)
+
+        # A class (callable, via its constructor) and a builtin also count as Callable.
+        cfg3 = CallableCfg(bare=str, typed=print)
+        self.assertIs(cfg3.bare, str)
+
+        with self.assertRaises(TypeError):
+            CallableCfg(bare=5, typed=fn)  # not callable
+
+        with self.assertRaises(TypeError):
+            CallableCfg(bare=fn, typed="not-callable")
 
     def test_nested_configs_in_collections(self):
         class ConfigListCfg(BlueprintCfg):

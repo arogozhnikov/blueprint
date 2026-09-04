@@ -6,7 +6,7 @@ import types
 import typing
 import warnings
 from abc import ABCMeta
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping, Sequence
 from typing import (
     Annotated,
     Any,
@@ -310,8 +310,8 @@ def check_type(value: Any, expected_type: Any) -> bool:
     if origin is Literal:
         return any(type(value) is type(arg) and value == arg for arg in args)
 
-    # Handle Collection types (list, tuple, dict, frozenset)
-    if origin in (list, tuple, dict, frozenset):
+    # Handle Collection types (list, tuple, dict, frozenset, Mapping, Sequence)
+    if origin in (list, tuple, dict, frozenset, Mapping, Sequence):
         if origin is list:
             if not isinstance(value, list):
                 return False
@@ -344,6 +344,27 @@ def check_type(value: Any, expected_type: Any) -> bool:
 
         elif origin is frozenset:
             if not isinstance(value, frozenset):
+                return False
+            if args:
+                item_type = args[0]
+                return all(check_type(item, item_type) for item in value)
+            return True
+
+        elif origin is Mapping:
+            # Accepts any object satisfying the Mapping protocol (dict, MappingProxyType,
+            # ConfigDict, ...), not just plain dict -- unlike the `dict` branch above.
+            if not isinstance(value, Mapping):
+                return False
+            if args:
+                key_type, val_type = args
+                return all(check_type(k, key_type) and check_type(v, val_type) for k, v in value.items())
+            return True
+
+        elif origin is Sequence:
+            # str/bytes/bytearray technically satisfy the Sequence protocol, but treating a
+            # single string as a "sequence of its characters" is virtually never what a
+            # Sequence[T]-typed field means -- exclude them, matching e.g. pydantic's convention.
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
                 return False
             if args:
                 item_type = args[0]
@@ -604,10 +625,10 @@ def _convert_value(value, expected_type):
     # counterparts or a subscripted list[...]/dict[...]/tuple[...]/frozenset[...]. Treat them
     # the same as their unconstrained (Any-typed) parameterized form so they still get wrapped
     # in the validating/immutable proxy instead of silently passing through as plain containers.
-    if expected_type in (list, dict, tuple, frozenset):
+    if expected_type in (list, dict, tuple, frozenset, Mapping, Sequence):
         origin = expected_type
 
-    if origin is list:
+    if origin in (list, Sequence):
         if isinstance(value, list):
             item_type = args[0] if args else Any
             return ConfigList(value, item_type)
@@ -627,7 +648,7 @@ def _convert_value(value, expected_type):
                 return tuple(_convert_value(item, arg) for item, arg in zip(value, args, strict=True))
             return value
 
-    if origin is dict:
+    if origin in (dict, Mapping):
         if isinstance(value, dict):
             key_type = args[0] if args and len(args) >= 1 else Any
             val_type = args[1] if args and len(args) >= 2 else Any
