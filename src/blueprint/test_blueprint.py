@@ -197,9 +197,12 @@ class TestCollectionTypeSpellings(unittest.TestCase):
         with self.assertRaises(AttributeError):
             cfg.a["z"] = 3  # frozen outside mutable_copy()
 
-    # ---- frozenset / AbstractSet: unchanged, set-like -----------------------------------
+    # ---- frozenset / AbstractSet: interchangeable spellings, set-like -------------------
 
-    def test_frozenset_field_is_strict_and_does_not_alias_source(self):
+    def test_frozenset_field_accepts_abstractset_and_does_not_alias_source(self):
+        # `frozenset[T]` and `AbstractSet[T]` are interchangeable spellings of the same field
+        # type (like Sequence[T]/ConfigList[T] and Mapping[K, V]/ConfigDict[K, V]): a plain
+        # (mutable) `set` is accepted and coerced into a `frozenset`.
         class FrozenSetCfg(BlueprintCfg):
             tags: frozenset[str]
 
@@ -207,7 +210,10 @@ class TestCollectionTypeSpellings(unittest.TestCase):
         cfg = FrozenSetCfg(tags=source)
         self.assertEqual(cfg.tags, source)
         self.assertIsNot(cfg.tags, source)
-        FrozenSetCfg(tags={"a", "b"})  # can assign plain set, that's fine.
+
+        cfg2 = FrozenSetCfg(tags={"a", "b"})  # plain set is coerced into a frozenset
+        self.assertIsInstance(cfg2.tags, frozenset)
+        self.assertEqual(cfg2.tags, {"a", "b"})
 
         with self.assertRaises(TypeError):
             FrozenSetCfg(tags=frozenset({"a", 1}))  # wrong item type

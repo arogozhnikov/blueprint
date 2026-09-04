@@ -225,7 +225,7 @@ def unchecked_field(
 
 def _substitute_typevars(tp: Any, typevar_mapping: dict[TypeVar, Any]) -> Any:
     """Recursively replaces TypeVars in type `tp` using typevar_mapping;
-    Recursion is needed for nested generics (`list[T]`, `dict[str, T]`, `T | None`, ...)
+    Recursion is needed for nested generics (`Sequence[T]`, `Mapping[str, T]`, `T | None`, ...)
     """
     if isinstance(tp, TypeVar):
         return typevar_mapping.get(tp, tp)
@@ -287,7 +287,7 @@ def _typecheck_for_pydantic(value, expected_type) -> bool | None:
 additional_typechecks.append(_typecheck_for_pydantic)
 
 
-_DISALLOWED_MUTABLE_TYPES2RECOMMENDED: dict[type, tuple[str, str]] = {
+_DISALLOWED_MUTABLE_TYPES_TO_RECOMMENDED: dict[type, tuple[str, str]] = {
     list: ("Sequence[T]", "ConfigList[T]"),
     MutableSequence: ("Sequence[T]", "ConfigList[T]"),
     dict: ("Mapping[K, V]", "ConfigDict[K, V]"),
@@ -305,12 +305,12 @@ def _reject_if_unsupported_collection_type(annotated_type: Any, origin: Any) -> 
     concrete = origin if origin is not None else annotated_type
     if not isinstance(concrete, type) or concrete in (ConfigList, ConfigDict):
         return
-    specific = _DISALLOWED_MUTABLE_TYPES2RECOMMENDED.get(concrete)
+    specific = _DISALLOWED_MUTABLE_TYPES_TO_RECOMMENDED.get(concrete)
     if specific is not None:
-        loose, strict = specific
+        spelling_a, spelling_b = specific
         raise TypeError(
             f"`{concrete.__name__}` is not supported as a blueprint field type -- blueprint "
-            f"has no mutable-tracked proxy for it. Use `{loose}` or `{strict}` instead. "
+            f"has no mutable-tracked proxy for it. Use `{spelling_a}` or `{spelling_b}` instead. "
             f"Got: {annotated_type!r}"
         )
     if issubclass(concrete, (MutableSequence, MutableMapping, MutableSet)):
@@ -320,13 +320,6 @@ def _reject_if_unsupported_collection_type(annotated_type: Any, origin: Any) -> 
             "(Sequence/Mapping/AbstractSet) or one of blueprint's Config* types instead. "
             f"Got: {annotated_type!r}"
         )
-
-
-def _assert_field_type_is_supported(annotated_type: Any) -> None:
-    """Recursively rejects unsupported collection types anywhere"""
-    _reject_if_unsupported_collection_type(annotated_type, get_origin(annotated_type))
-    for arg in get_args(annotated_type):
-        _assert_field_type_is_supported(arg)
 
 
 def check_type(value: Any, expected_type: Any) -> bool:
@@ -383,14 +376,6 @@ def check_type(value: Any, expected_type: Any) -> bool:
                 return False
             return all(check_type(v, arg) for v, arg in zip(value, args))
 
-        elif origin is frozenset:
-            if not isinstance(value, frozenset):
-                return False
-            if args:
-                item_type = args[0]
-                return all(check_type(item, item_type) for item in value)
-            return True
-
         elif origin in (Mapping, ConfigDict):
             # `Mapping[K, V]` and `ConfigDict[K, V]` are interchangeable spellings of the same
             # field type: accepts any object satisfying the Mapping protocol (dict,
@@ -414,9 +399,9 @@ def check_type(value: Any, expected_type: Any) -> bool:
                 return all(check_type(item, item_type) for item in value)
             return True
 
-        elif origin is AbstractSet:
-            # typing.AbstractSet[T]: accepts anything satisfying the
-            # Set protocol (set, frozenset, ...), not just plain set
+        elif origin in (frozenset, AbstractSet):
+            # `frozenset[T]` and `AbstractSet[T]` are interchangeable spellings of the same
+            # field type: accepts anything satisfying the Set protocol (set, frozenset, ...).
             if not isinstance(value, AbstractSet):
                 return False
             if args:
@@ -859,7 +844,12 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             if name in combined_fields:
                 new_field_info._merge_in_parent_fieldinfo(combined_fields[name])
 
-            _assert_field_type_is_supported(actual_type)
+            # we prohibit some type annotations
+            _to_check = [actual_type]
+            while len(_to_check) > 0:
+                annotated_type = _to_check.pop()
+                _reject_if_unsupported_collection_type(annotated_type, get_origin(annotated_type))
+                _to_check.extend(get_args(annotated_type))  # schedule subfield for checking
 
             combined_fields[name] = new_field_info
             combined_fields[name].type = actual_type
@@ -1083,7 +1073,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             with x.mutable_copy() as y:
                 y.some_field = ...
                 y.child.name = "..."       # cascades: nested configs are mutable too
-                y.children.append(...)     # ...and so are nested list/dict fields
+                y.children.append(...)     # ...and so are nested Sequence/Mapping/AbstractSet fields
 
         Result is (recursively) validated at exit.
         """
