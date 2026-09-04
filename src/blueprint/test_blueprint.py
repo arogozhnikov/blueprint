@@ -9,6 +9,8 @@ import inspect
 import pickle
 import unittest
 import warnings
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta
 from typing import Annotated, ClassVar, Generic, Literal, TypeVar
 
@@ -326,6 +328,265 @@ class TestBlueprintCfg(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             BareFrozenSetCfg(items=[1, 2])  # a list isn't a frozenset
+
+    def test_mapping_type_checking_and_mutation(self):
+        # Mapping[K, V] accepts anything satisfying the Mapping protocol; a plain dict given
+        # for one is wrapped into ConfigDict just like dict[K, V] is.
+        class MappingCfg(BlueprintCfg):
+            data: Mapping[str, int]
+
+        cfg = MappingCfg(data={"a": 1, "b": 2})
+        self.assertEqual(cfg.data, {"a": 1, "b": 2})
+        self.assertIsInstance(cfg.data, ConfigDict)
+
+        with self.assertRaises(TypeError):
+            MappingCfg(data={"a": "not-an-int"})  # wrong value type
+
+        with self.assertRaises(TypeError):
+            MappingCfg(data={1: 1})  # wrong key type
+
+        with self.assertRaises(TypeError):
+            MappingCfg(data=[("a", 1)])  # a list of pairs isn't a Mapping
+
+        with cfg.mutable_copy() as y:
+            y.data["c"] = 3
+            with self.assertRaises(TypeError):
+                y.data["d"] = "nope"
+        self.assertEqual(cfg.data, {"a": 1, "b": 2})  # original untouched
+
+    def test_sequence_type_checking_and_mutation(self):
+        # Sequence[T] accepts list, tuple, ... but deliberately not str/bytes -- treating a
+        # single string as "a sequence of its characters" is virtually never intended. A plain
+        # list given for one is wrapped into ConfigList just like list[T] is; a tuple is left
+        # as a tuple (already immutable, nothing to wrap).
+        class SequenceCfg(BlueprintCfg):
+            items: Sequence[int]
+
+        cfg = SequenceCfg(items=[1, 2, 3])
+        self.assertEqual(cfg.items, [1, 2, 3])
+        self.assertIsInstance(cfg.items, ConfigList)
+
+        cfg_tuple = SequenceCfg(items=(1, 2, 3))
+        self.assertEqual(cfg_tuple.items, (1, 2, 3))
+        self.assertIsInstance(cfg_tuple.items, tuple)
+        self.assertNotIsInstance(cfg_tuple.items, ConfigList)
+
+        with self.assertRaises(TypeError):
+            SequenceCfg(items=["a", "b"])  # wrong item type
+
+        with self.assertRaises(TypeError):
+            SequenceCfg(items="12")  # a str isn't accepted, even though it's a Sequence[str]
+
+        with self.assertRaises(TypeError):
+            SequenceCfg(items={1: 2})  # a dict isn't a Sequence
+
+        with cfg.mutable_copy() as y:
+            y.items.append(4)
+            with self.assertRaises(TypeError):
+                y.items.append("nope")
+        self.assertEqual(cfg.items, [1, 2, 3])  # original untouched
+
+    def test_mapping_and_sequence_fields_accept_none(self):
+        # Mapping[K, V] | None / Sequence[T] | None: the common "optional collection" shape.
+        class OptionalCollectionsCfg(BlueprintCfg):
+            mapping: Mapping[str, int] | None
+            sequence: Sequence[int] | None
+
+        cfg_none = OptionalCollectionsCfg(mapping=None, sequence=None)
+        self.assertIsNone(cfg_none.mapping)
+        self.assertIsNone(cfg_none.sequence)
+
+        cfg = OptionalCollectionsCfg(mapping={"a": 1}, sequence=[1, 2])
+        self.assertEqual(cfg.mapping, {"a": 1})
+        self.assertEqual(cfg.sequence, [1, 2])
+
+        with self.assertRaises(TypeError):
+            OptionalCollectionsCfg(mapping={"a": "not-an-int"}, sequence=[1, 2])
+
+        with self.assertRaises(TypeError):
+            OptionalCollectionsCfg(mapping={"a": 1}, sequence=["not-an-int"])
+
+        with cfg.mutable_copy() as y:
+            y.mapping = None
+            y.sequence = None
+            self.assertIsNone(y.mapping)
+            self.assertIsNone(y.sequence)
+            with self.assertRaises(TypeError):
+                y.mapping = ["not-a-mapping"]
+            with self.assertRaises(TypeError):
+                y.sequence = {"not": "a-sequence"}
+
+    def test_bare_mapping_and_sequence_annotations_are_still_wrapped(self):
+        # Same rationale as test_bare_collection_annotations_are_still_wrapped, for the
+        # collections.abc forms: bare `Mapping`/`Sequence` (no subscript) should behave like
+        # their Any-typed parameterized form, and still get wrapped in the validating/immutable
+        # proxy rather than passing through as a plain dict/list.
+        class BareMappingSequenceCfg(BlueprintCfg):
+            mapping: Mapping
+            sequence: Sequence
+
+        cfg = BareMappingSequenceCfg(mapping={"a": 1}, sequence=[1, "two", 3.0])
+        self.assertIsInstance(cfg.mapping, ConfigDict)
+        self.assertIsInstance(cfg.sequence, ConfigList)
+
+        with self.assertRaises(AttributeError):
+            cfg.mapping["b"] = 2
+        with self.assertRaises(AttributeError):
+            cfg.sequence.append(4)
+
+    def test_set_type_checking_and_mutation(self):
+        # set[T]: blueprint has no mutable-tracked set proxy (unlike ConfigList/ConfigDict), so
+        # a plain (mutable) set given for a set[T] field is instead frozen into a frozenset for
+        # storage -- the same "reassign the whole field" mutation model as frozenset[T], not
+        # in-place add()/discard()/update().
+        class SetCfg(BlueprintCfg):
+            tags: frozenset[str]
+
+        cfg = SetCfg(tags={"a", "b"})
+        self.assertEqual(cfg.tags, {"a", "b"})
+        self.assertIsInstance(cfg.tags, frozenset)
+
+        with self.assertRaises(TypeError):
+            SetCfg(tags={"a", 1})  # wrong item type
+
+        with self.assertRaises(TypeError):
+            SetCfg(tags=["a", "b"])  # a list isn't a set
+
+        with self.assertRaises(TypeError):
+            SetCfg(tags=frozenset({"a", "b"}))  # nor is a frozenset -- set[T] wants a mutable set
+
+        with cfg.mutable_copy() as y:
+            y.tags = {"x", "y", "z"}  # a plain set is accepted here too, and frozen again
+            self.assertEqual(y.tags, {"x", "y", "z"})
+            self.assertIsInstance(y.tags, frozenset)
+            with self.assertRaises(TypeError):
+                # raised directly from _convert_value's item-conversion loop, same as a bad
+                # item raises directly from within ConfigList/ConfigDict -- not the
+                # InvalidBlueprintError that field-level check_type()/bound checks raise.
+                y.tags = {"x", 1}
+
+        self.assertEqual(cfg.tags, {"a", "b"})  # original untouched
+
+        with self.assertRaises(AttributeError):
+            cfg.tags = {"nope"}  # frozen outside mutable_copy()
+
+    def test_bare_set_annotation_is_still_type_checked_and_wrapped(self):
+        # Same rationale as test_bare_collection_annotations_are_still_wrapped: bare `set`
+        # (no subscript) should behave like set[Any].
+        class BareSetCfg(BlueprintCfg):
+            items: frozenset
+
+        cfg = BareSetCfg(items={1, "two", 3.0})
+        self.assertEqual(cfg.items, frozenset({1, "two", 3.0}))
+        self.assertIsInstance(cfg.items, frozenset)
+
+        with self.assertRaises(TypeError):
+            BareSetCfg(items=[1, 2])  # a list isn't a set
+
+        with self.assertRaises(AttributeError):
+            cfg.items.add(4)
+
+    def test_typing_set_is_an_alias_for_plain_set(self):
+        # typing.Set[T] is a deprecated alias whose origin is plain `set` -- it goes through
+        # the exact same code path as set[T], not the AbstractSet[T] protocol handling below.
+        from typing import Set  # noqa: UP035
+
+        class TypingSetCfg(BlueprintCfg):
+            tags: Set[str]  # noqa: UP006 -- the deprecated alias is exactly what's under test
+
+        cfg = TypingSetCfg(tags={"a", "b"})
+        self.assertEqual(cfg.tags, frozenset({"a", "b"}))
+        self.assertIsInstance(cfg.tags, frozenset)
+
+        with self.assertRaises(TypeError):
+            TypingSetCfg(tags={"a", 1})  # wrong item type
+
+        with self.assertRaises(TypeError):
+            TypingSetCfg(tags=frozenset({"a", "b"}))  # a frozenset isn't a (mutable) set
+
+    def test_abstract_set_type_checking_and_mutation(self):
+        # AbstractSet[T] (typing.AbstractSet / collections.abc.Set) accepts anything satisfying
+        # the Set protocol -- both `set` and `frozenset` -- unlike set[T], which only accepts a
+        # plain (mutable) set. A plain set given for one is still wrapped into frozenset for the
+        # usual immutability guarantee; a frozenset is left as a frozenset (already immutable).
+        class AbstractSetCfg(BlueprintCfg):
+            tags: AbstractSet[str]
+
+        cfg = AbstractSetCfg(tags={"a", "b"})
+        self.assertEqual(cfg.tags, {"a", "b"})
+        self.assertIsInstance(cfg.tags, frozenset)
+
+        cfg_frozen = AbstractSetCfg(tags=frozenset({"a", "b"}))
+        self.assertEqual(cfg_frozen.tags, {"a", "b"})
+        self.assertIsInstance(cfg_frozen.tags, frozenset)
+
+        with self.assertRaises(TypeError):
+            AbstractSetCfg(tags={"a", 1})  # wrong item type
+
+        with self.assertRaises(TypeError):
+            AbstractSetCfg(tags=["a", "b"])  # a list satisfies neither set nor frozenset
+
+        with cfg.mutable_copy() as y:
+            y.tags = {"c"}  # reassigning with a plain set still gets frozen
+            self.assertEqual(y.tags, {"c"})
+            self.assertIsInstance(y.tags, frozenset)
+            y.tags = frozenset({"d"})  # a frozenset works too, for this annotation
+            self.assertIsInstance(y.tags, frozenset)
+            with self.assertRaises(TypeError):
+                # same rationale as above: raised directly from _convert_value.
+                y.tags = {"e", 1}
+        self.assertEqual(cfg.tags, {"a", "b"})  # original untouched
+
+        # both representations end up frozen -- neither offers in-place add()/mutable_copy()-
+        # driven mutation, only whole-field reassignment (checked above).
+        with cfg_frozen.mutable_copy() as yf:
+            with self.assertRaises(AttributeError):
+                yf.tags.add("c")
+
+    def test_bare_abstract_set_annotation_is_still_type_checked(self):
+        # Same rationale as test_bare_set_annotation_is_still_type_checked_and_wrapped: bare
+        # `AbstractSet` (no subscript) should behave like AbstractSet[Any].
+        class BareAbstractSetCfg(BlueprintCfg):
+            items: AbstractSet
+
+        cfg = BareAbstractSetCfg(items={1, "two", 3.0})
+        self.assertEqual(cfg.items, frozenset({1, "two", 3.0}))
+        self.assertIsInstance(cfg.items, frozenset)
+
+        cfg_frozen = BareAbstractSetCfg(items=frozenset({1, "two", 3.0}))
+        self.assertIsInstance(cfg_frozen.items, frozenset)
+
+        with self.assertRaises(TypeError):
+            BareAbstractSetCfg(items=[1, 2])  # a list satisfies neither set nor frozenset
+
+    def test_callable_type_checking(self):
+        # Callable (bare) and Callable[[Arg, ...], Ret]: only `callable(value)` is checked --
+        # argument/return types are never inspected (see check_type()'s Callable branch).
+        class CallableCfg(BlueprintCfg):
+            bare: Callable
+            typed: Callable[[int, str], float]
+
+        def fn(x: int, y: str) -> float:
+            return float(x) + len(y)
+
+        cfg = CallableCfg(bare=fn, typed=fn)
+        self.assertIs(cfg.bare, fn)
+        self.assertIs(cfg.typed, fn)
+
+        # Any callable is accepted for the typed field, regardless of its actual signature --
+        # blueprint does not check Callable argument/return types.
+        cfg2 = CallableCfg(bare=len, typed=lambda: 0)  # wrong arity for Callable[[int, str], float]
+        self.assertEqual(cfg2.typed(), 0)
+
+        # A class (callable, via its constructor) and a builtin also count as Callable.
+        cfg3 = CallableCfg(bare=str, typed=print)
+        self.assertIs(cfg3.bare, str)
+
+        with self.assertRaises(TypeError):
+            CallableCfg(bare=5, typed=fn)  # not callable
+
+        with self.assertRaises(TypeError):
+            CallableCfg(bare=fn, typed="not-callable")
 
     def test_nested_configs_in_collections(self):
         class ConfigListCfg(BlueprintCfg):
