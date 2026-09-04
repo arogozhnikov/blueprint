@@ -36,12 +36,14 @@ Requires Python 3.11 or newer.
 ## Quick example
 
 ```python
+from collections.abc import Sequence
+
 from blueprint import BlueprintCfg, field
 
 class ServerCfg(BlueprintCfg):
     host: str = "localhost"
     port: int = 8080
-    tags: list[str] = field(default_factory=list)
+    tags: Sequence[str] = field(default_factory=list)
 
     def check(self):
         if not (0 < self.port < 65536):
@@ -63,18 +65,25 @@ assert new_cfg.port == 9000
 ```
 
 Fields support plain types, `Optional`/`Union`, `Literal`, `Enum`, nested
-`BlueprintCfg` classes, and `list[T]` / `dict[K, V]` / `tuple[...]` /
-`frozenset[T]` collections, all recursively type-checked on construction and
-on every mutation. `blueprint.format()` pretty-prints a config (and its
+`BlueprintCfg` classes, and collections spelled as `tuple[...]`,
+`Sequence[T]`/`ConfigList[T]` (list-like), `Mapping[K, V]`/`ConfigDict[K, V]`
+(dict-like), or `frozenset[T]`/`AbstractSet[T]` (set-like) -- all recursively
+type-checked on construction and on every mutation. Plain `list`, `dict`, and
+`set` are intentionally **not** accepted as field types: blueprint has no
+mutable-tracked proxy for them, so it stores the collection as a
+`ConfigList`/`ConfigDict`/`frozenset` instead and asks you to spell the field
+that way up front. `blueprint.format()` pretty-prints a config (and its
 nested configs/collections), wrapping long lines for readability.
 
 ## Nested configs and collections
 
 Mutability cascades: unlocking a config with `mutable_copy()` also unlocks
-every nested `BlueprintCfg`, list, and dict field reachable from it, so you
-don't need a separate `mutable_copy()` per nested object.
+every nested `BlueprintCfg`, `ConfigList`, and `ConfigDict` field reachable
+from it, so you don't need a separate `mutable_copy()` per nested object.
 
 ```python
+from collections.abc import Sequence
+
 import blueprint
 from blueprint import BlueprintCfg, field
 
@@ -85,7 +94,7 @@ class RetryCfg(BlueprintCfg):
 class ServiceCfg(BlueprintCfg):
     name: str
     retry: RetryCfg = field(default_factory=RetryCfg)
-    endpoints: list[str] = field(default_factory=list)
+    endpoints: Sequence[str] = field(default_factory=list)
 
 svc = ServiceCfg(name="api", endpoints=["https://a.example"])
 
