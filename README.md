@@ -239,6 +239,9 @@ class TrainCfg(BlueprintCfg):
     model: torch.nn.Module = unchecked_field()
 ```
 
+If blueprint can't check some field &mdash; you can extend typechecking rules, 
+see `_typecheck_for_pydantic` as an example.
+
 ## Show me some examples!
 
 `examples/example.py` is a runnable, commented tour of everything above (and is covered by

@@ -263,6 +263,21 @@ def _build_typevar_mapping(cls) -> dict[TypeVar, Any]:
     return mapping
 
 
+additional_typechecks: list[Callable] = []
+
+
+def _typecheck_for_pydantic(value, expected_type) -> bool | None:
+    # generic pydantics ... require separate handling. Model[T] is not generic alias.
+    meta = getattr(expected_type, "__pydantic_generic_metadata__", None)
+    if meta is not None and meta.get("origin") is not None:
+        return isinstance(value, meta["origin"])
+    return None  # None means "this rule is not appliable", bool is valid/invalid
+
+
+# example: how one can add handling of custom classes
+additional_typechecks.append(_typecheck_for_pydantic)
+
+
 def check_type(value: Any, expected_type: Any) -> bool:
     """Recursively validates if a value matches the expected type constraint."""
     if expected_type is None or expected_type is type(None):
@@ -342,6 +357,15 @@ def check_type(value: Any, expected_type: Any) -> bool:
     # Handle BlueprintCfg subclasses
     if isinstance(expected_type, type) and issubclass(expected_type, BlueprintCfg):
         return isinstance(value, expected_type)
+
+    # Callables - do not check arguments, only check if it is a callable
+    if origin is Callable:
+        return callable(value)
+
+    for check_callable in additional_typechecks:
+        result = check_callable(value, expected_type)
+        if result is not None:
+            return result
 
     # Handle standard type checking
     if isinstance(expected_type, type):
