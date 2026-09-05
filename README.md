@@ -10,11 +10,11 @@ and the only way to change one is through an explicit `mutable_copy()`
 block, which hands you an independent, deep, mutable copy and re-validates
 it when the block exits.
 
-There are multiple config methods, they mostly address wrong problems.
+There are many Python config libraries out there, and most of them solve the wrong problems.
 
 Blueprint focuses on these three: 
 - helpful (though not exhaustive) typechecking,
-- compositionaly of configs with complex code-level logic,
+- composability of configs with complex code-level logic,
 - reliability
 
 ## Install
@@ -36,12 +36,14 @@ Requires Python 3.11 or newer.
 ## Quick example
 
 ```python
+from collections.abc import Sequence
+
 from blueprint import BlueprintCfg, field
 
 class ServerCfg(BlueprintCfg):
     host: str = "localhost"
     port: int = 8080
-    tags: list[str] = field(default_factory=list)
+    tags: Sequence[str] = field(default_factory=list)
 
     def check(self):
         if not (0 < self.port < 65536):
@@ -63,18 +65,26 @@ assert new_cfg.port == 9000
 ```
 
 Fields support plain types, `Optional`/`Union`, `Literal`, `Enum`, nested
-`BlueprintCfg` classes, and `list[T]` / `dict[K, V]` / `tuple[...]` /
-`frozenset[T]` collections, all recursively type-checked on construction and
-on every mutation. `blueprint.format()` pretty-prints a config (and its
+`BlueprintCfg` classes, and collections spelled as `tuple[...]`,
+`Sequence[T]`/`ConfigList[T]` (list-like), `Mapping[K, V]`/`ConfigDict[K, V]`
+(dict-like), or `frozenset[T]`/`AbstractSet[T]` (set-like) -- all recursively
+type-checked on construction and on every mutation. 
+
+Plain `list`, `dict`, `set` (and their `collections.abc` counterparts
+`MutableSequence`, `MutableMapping`, `MutableSet`) are intentionally **not** accepted - prefer Mapping / Sequence / frozenset, they better reflect immutable semantics.
+
+`blueprint.format()` pretty-prints a config (and its
 nested configs/collections), wrapping long lines for readability.
 
 ## Nested configs and collections
 
 Mutability cascades: unlocking a config with `mutable_copy()` also unlocks
-every nested `BlueprintCfg`, list, and dict field reachable from it, so you
-don't need a separate `mutable_copy()` per nested object.
+every nested `BlueprintCfg`, `ConfigList`, and `ConfigDict` field reachable
+from it, so you don't need a separate `mutable_copy()` per nested object.
 
 ```python
+from collections.abc import Sequence
+
 import blueprint
 from blueprint import BlueprintCfg, field
 
@@ -85,7 +95,7 @@ class RetryCfg(BlueprintCfg):
 class ServiceCfg(BlueprintCfg):
     name: str
     retry: RetryCfg = field(default_factory=RetryCfg)
-    endpoints: list[str] = field(default_factory=list)
+    endpoints: Sequence[str] = field(default_factory=list)
 
 svc = ServiceCfg(name="api", endpoints=["https://a.example"])
 
@@ -135,7 +145,7 @@ ServerCfg.kind   # "server" -- base class untouched
 
 ## Comparison with other common tools
 
-We have a ton of config libs. Why creating one more? 
+We have a ton of config libs. Why create one more? 
 
 Compared to Hydra/OmegaConf/etc: code-based configuration, convenient checks, static typechecking. Overrides without craziness.
 
@@ -156,13 +166,13 @@ cfg = cfg.model_copy(
 with cfg.mutable_copy() as cfg:
     cfg.retry.max_attempts = 10
 ```
-Additionally, multiple change paths in pydantic do not trigger revalidation - poor behaviour for configs.
+Additionally, multiple change paths in pydantic do not trigger revalidation - poor behavior for configs.
 
 
 ## Important gotchas
 
-Everything that goes into config (in constructor or by assignment) 
-is immediately cloned, and has no link connections to previously existing objects.
+Everything that goes into config (in constructor or by assignment)
+is immediately cloned, and holds no reference back to the object it was built from.
 
 ```python
 source_tags = ["a", "b"]
@@ -178,8 +188,10 @@ with ServiceCfg(name="api", retry=retry).mutable_copy() as svc2:
 assert retry.max_attempts == 1  # the object `retry` still points at is untouched
 ```
 
-Returned lists / dicts fields are not lists, but their immutable subclasses.
-This is usually correct decision, as you should not modify configs or config fields, but also can be confusing if some deeper code assumes the list is modifiable.
+Fields typed as `Sequence[T]` / `Mapping[K, V]` / `AbstractSet[T]` are stored
+internally as `ConfigList` / `ConfigDict` / `frozenset` -- not plain `list` / `dict` -- so
+mutating methods like `.append()` or item assignment raise outside `mutable_copy().
+
 
 There is no yaml/json (de)serialization, on purpose -- `as_dict()` gets you a plain dict view, but there's no `from_dict()` back (and there shouldn't be!).
 There is a readable reproducible formatting, also on purpose.
@@ -229,7 +241,7 @@ with blueprint.debug_prohibit_mutability():
         ...
 ```
 
-One can store arbitraty fields in blueprint with `unchecked_field`, however this is a bad idea in general, and discouraged. You also lose any mutability guarantees.
+One can store arbitrary fields in blueprint with `unchecked_field`, however this is a bad idea in general, and discouraged. You also lose any mutability guarantees.
 
 ```python
 from blueprint import BlueprintCfg, unchecked_field
@@ -238,6 +250,9 @@ class TrainCfg(BlueprintCfg):
     name: str
     model: torch.nn.Module = unchecked_field()
 ```
+
+If blueprint can't check some field &mdash; you can extend typechecking rules, 
+see `_typecheck_for_pydantic` as an example.
 
 ## Show me some examples!
 

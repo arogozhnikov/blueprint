@@ -6,7 +6,16 @@ import types
 import typing
 import warnings
 from abc import ABCMeta
-from collections.abc import Callable, Generator
+from collections.abc import (
+    Callable,
+    Generator,
+    Mapping,
+    MutableMapping,
+    MutableSequence,
+    MutableSet,
+    Sequence,
+)
+from collections.abc import Set as AbstractSet
 from typing import (
     Annotated,
     Any,
@@ -216,7 +225,7 @@ def unchecked_field(
 
 def _substitute_typevars(tp: Any, typevar_mapping: dict[TypeVar, Any]) -> Any:
     """Recursively replaces TypeVars in type `tp` using typevar_mapping;
-    Recursion is needed for nested generics (`list[T]`, `dict[str, T]`, `T | None`, ...)
+    Recursion is needed for nested generics (`Sequence[T]`, `Mapping[str, T]`, `T | None`, ...)
     """
     if isinstance(tp, TypeVar):
         return typevar_mapping.get(tp, tp)
@@ -263,6 +272,56 @@ def _build_typevar_mapping(cls) -> dict[TypeVar, Any]:
     return mapping
 
 
+additional_typechecks: list[Callable] = []
+
+
+def _typecheck_for_pydantic(value, expected_type) -> bool | None:
+    # generic pydantics ... require separate handling. Model[T] is not generic alias.
+    meta = getattr(expected_type, "__pydantic_generic_metadata__", None)
+    if meta is not None and meta.get("origin") is not None:
+        return isinstance(value, meta["origin"])
+    return None  # None means "this rule is not appliable", bool is valid/invalid
+
+
+# example: how one can add handling of custom classes
+additional_typechecks.append(_typecheck_for_pydantic)
+
+
+_DISALLOWED_MUTABLE_TYPES_TO_RECOMMENDED: dict[type, tuple[str, str]] = {
+    list: ("Sequence[T]", "ConfigList[T]"),
+    MutableSequence: ("Sequence[T]", "ConfigList[T]"),
+    dict: ("Mapping[K, V]", "ConfigDict[K, V]"),
+    MutableMapping: ("Mapping[K, V]", "ConfigDict[K, V]"),
+    set: ("frozenset[T]", "AbstractSet[T]"),
+    MutableSet: ("frozenset[T]", "AbstractSet[T]"),
+}
+
+
+def _reject_if_unsupported_collection_type(annotated_type: Any, origin: Any) -> None:
+    """Raises if `annotated_type` (whose already-computed `get_origin()` is `origin`) is a
+    structurally mutable container type. `ConfigList`/`ConfigDict` are exempted even though
+    they subclass `list`/`dict` (and so would otherwise match both the explicit table above
+    and the general MutableSequence/MutableMapping check below)."""
+    concrete = origin if origin is not None else annotated_type
+    if not isinstance(concrete, type) or concrete in (ConfigList, ConfigDict):
+        return
+    specific = _DISALLOWED_MUTABLE_TYPES_TO_RECOMMENDED.get(concrete)
+    if specific is not None:
+        spelling_a, spelling_b = specific
+        raise TypeError(
+            f"`{concrete.__name__}` is not supported as a blueprint field type -- blueprint "
+            f"has no mutable-tracked proxy for it. Use `{spelling_a}` or `{spelling_b}` instead. "
+            f"Got: {annotated_type!r}"
+        )
+    if issubclass(concrete, (MutableSequence, MutableMapping, MutableSet)):
+        raise TypeError(
+            "mutable container types aren't supported as blueprint field types -- blueprint "
+            "has no proxy that could track mutation of one safely. Use an immutable protocol "
+            "(Sequence/Mapping/AbstractSet) or one of blueprint's Config* types instead. "
+            f"Got: {annotated_type!r}"
+        )
+
+
 def check_type(value: Any, expected_type: Any) -> bool:
     """Recursively validates if a value matches the expected type constraint."""
     if expected_type is None or expected_type is type(None):
@@ -281,6 +340,12 @@ def check_type(value: Any, expected_type: Any) -> bool:
     origin = get_origin(expected_type)
     args = get_args(expected_type)
 
+    # Bare (unsubscripted) collection types have no origin (get_origin(list) is None.
+    if expected_type in (tuple, frozenset, Mapping, Sequence, AbstractSet, ConfigList, ConfigDict):
+        origin = expected_type
+
+    _reject_if_unsupported_collection_type(expected_type, origin)
+
     # Unpack Annotated
     if origin is Annotated:
         return check_type(value, args[0])
@@ -295,17 +360,9 @@ def check_type(value: Any, expected_type: Any) -> bool:
     if origin is Literal:
         return any(type(value) is type(arg) and value == arg for arg in args)
 
-    # Handle Collection types (list, tuple, dict, frozenset)
-    if origin in (list, tuple, dict, frozenset):
-        if origin is list:
-            if not isinstance(value, list):
-                return False
-            if args:
-                item_type = args[0]
-                return all(check_type(item, item_type) for item in value)
-            return True
-
-        elif origin is tuple:
+    # Handle Collection types
+    if origin in (tuple, frozenset, Mapping, Sequence, AbstractSet, ConfigList, ConfigDict):
+        if origin is tuple:
             if not isinstance(value, tuple):
                 return False
             if not args:
@@ -319,16 +376,33 @@ def check_type(value: Any, expected_type: Any) -> bool:
                 return False
             return all(check_type(v, arg) for v, arg in zip(value, args))
 
-        elif origin is dict:
-            if not isinstance(value, dict):
+        elif origin in (Mapping, ConfigDict):
+            # `Mapping[K, V]` and `ConfigDict[K, V]` are interchangeable spellings of the same
+            # field type: accepts any object satisfying the Mapping protocol (dict,
+            # MappingProxyType, ConfigDict, ...).
+            if not isinstance(value, Mapping):
                 return False
             if args:
                 key_type, val_type = args
                 return all(check_type(k, key_type) and check_type(v, val_type) for k, v in value.items())
             return True
 
-        elif origin is frozenset:
-            if not isinstance(value, frozenset):
+        elif origin in (Sequence, ConfigList):
+            # `Sequence[T]` and `ConfigList[T]` are interchangeable spellings of the same field
+            # type. str/bytes/bytearray technically satisfy the Sequence protocol, but treating
+            # a single string as a "sequence of its characters" is virtually never what this
+            # field type means -- exclude them, matching e.g. pydantic's convention.
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+                return False
+            if args:
+                item_type = args[0]
+                return all(check_type(item, item_type) for item in value)
+            return True
+
+        elif origin in (frozenset, AbstractSet):
+            # `frozenset[T]` and `AbstractSet[T]` are interchangeable spellings of the same
+            # field type: accepts anything satisfying the Set protocol (set, frozenset, ...).
+            if not isinstance(value, AbstractSet):
                 return False
             if args:
                 item_type = args[0]
@@ -342,6 +416,15 @@ def check_type(value: Any, expected_type: Any) -> bool:
     # Handle BlueprintCfg subclasses
     if isinstance(expected_type, type) and issubclass(expected_type, BlueprintCfg):
         return isinstance(value, expected_type)
+
+    # Callables - do not check arguments, only check if it is a callable
+    if origin is Callable:
+        return callable(value)
+
+    for check_callable in additional_typechecks:
+        result = check_callable(value, expected_type)
+        if result is not None:
+            return result
 
     # Handle standard type checking
     if isinstance(expected_type, type):
@@ -555,7 +638,7 @@ def _flat_iter_containers(value):
     elif isinstance(value, frozenset):
         for item in value:
             yield from _flat_iter_containers(item)
-    # list/dict can't appear here, and are expected to be converted before calling this func
+    # list/dict/set can't appear here, and are expected to be converted before calling this func
 
 
 def _convert_value(value, expected_type):
@@ -575,15 +658,13 @@ def _convert_value(value, expected_type):
         origin = get_origin(expected_type)
         args = get_args(expected_type)
 
-    # Bare `list`/`dict`/`tuple`/`frozenset` (no subscript) are plain classes, not generic
-    # aliases -- get_origin() returns None for them, unlike their typing.List/Dict/Tuple
-    # counterparts or a subscripted list[...]/dict[...]/tuple[...]/frozenset[...]. Treat them
-    # the same as their unconstrained (Any-typed) parameterized form so they still get wrapped
-    # in the validating/immutable proxy instead of silently passing through as plain containers.
-    if expected_type in (list, dict, tuple, frozenset):
+    # non-generic (bare) types - get_origin() returns None for them, handling separately
+    if expected_type in (tuple, frozenset, Mapping, Sequence, AbstractSet, ConfigList, ConfigDict):
         origin = expected_type
 
-    if origin is list:
+    _reject_if_unsupported_collection_type(expected_type, origin)
+
+    if origin in (Sequence, ConfigList):
         if isinstance(value, list):
             item_type = args[0] if args else Any
             return ConfigList(value, item_type)
@@ -603,18 +684,18 @@ def _convert_value(value, expected_type):
                 return tuple(_convert_value(item, arg) for item, arg in zip(value, args, strict=True))
             return value
 
-    if origin is dict:
-        if isinstance(value, dict):
-            key_type = args[0] if args and len(args) >= 1 else Any
-            val_type = args[1] if args and len(args) >= 2 else Any
-            return ConfigDict(value, key_type, val_type)
-        return value
+    if origin in (Mapping, ConfigDict):
+        if not isinstance(value, Mapping):
+            return value  # let check_type complain correctly
+        key_type = args[0] if args and len(args) >= 1 else Any
+        val_type = args[1] if args and len(args) >= 2 else Any
+        return ConfigDict(value, key_type, val_type)
 
-    if origin is frozenset:
-        if isinstance(value, frozenset):
-            item_type = args[0] if args else Any
-            return frozenset(_convert_value(item, item_type) for item in value)
-        return value
+    if origin in (frozenset, AbstractSet):
+        if not isinstance(value, AbstractSet):
+            return value  # let check_type complain correctly
+        item_type = args[0] if args else Any
+        return frozenset(_convert_value(item, item_type) for item in value)
 
     return value
 
@@ -762,6 +843,13 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             # If field already existed, merge inherited values
             if name in combined_fields:
                 new_field_info._merge_in_parent_fieldinfo(combined_fields[name])
+
+            # we prohibit some type annotations
+            _to_check = [actual_type]
+            while len(_to_check) > 0:
+                annotated_type = _to_check.pop()
+                _reject_if_unsupported_collection_type(annotated_type, get_origin(annotated_type))
+                _to_check.extend(get_args(annotated_type))  # schedule subfield for checking
 
             combined_fields[name] = new_field_info
             combined_fields[name].type = actual_type
@@ -985,7 +1073,7 @@ class BlueprintCfg(metaclass=_BlueprintCfgMeta):
             with x.mutable_copy() as y:
                 y.some_field = ...
                 y.child.name = "..."       # cascades: nested configs are mutable too
-                y.children.append(...)     # ...and so are nested list/dict fields
+                y.children.append(...)     # ...and so are nested Sequence/Mapping/AbstractSet fields
 
         Result is (recursively) validated at exit.
         """

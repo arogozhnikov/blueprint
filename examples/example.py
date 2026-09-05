@@ -3,6 +3,8 @@ Runnable tour of blueprint's features.
 Just install blueprint and run this file.
 """
 
+from collections.abc import Sequence
+
 import blueprint
 from blueprint import BlueprintCfg, InvalidBlueprintError, field
 
@@ -21,7 +23,7 @@ class RetryCfg(BlueprintCfg):
 class ServerCfg(BlueprintCfg):
     host: str = "localhost"
     port: int = 8080
-    tags: list[str] = field(default_factory=list)
+    tags: Sequence[str] = field(default_factory=list)
     retry: RetryCfg = field(default_factory=RetryCfg)
     as_admin: bool = False
 
@@ -54,7 +56,8 @@ except AttributeError as e:
 
 with cfg.mutable_copy() as cfg2:
     cfg2.port = 9000
-    cfg2.tags.append("staging")  # nested list fields are mutable too, inside the block
+    cfg2.tags[0] = "prod"  # type: ignore  # you can change element
+    cfg2.tags = [*cfg2.tags, "staging"]  # or extend it (probably easiest)
     cfg2.retry.max_attempts = 5  # ...and so are nested configs, no separate mutable_copy()
 
 print(f"cfg  (untouched): {blueprint.format(cfg)}")
